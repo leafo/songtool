@@ -1,0 +1,196 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"gitlab.com/gomidi/midi/v2/smf"
+)
+
+func main() {
+	var jsonOutput bool
+	var filename string
+
+	if len(os.Args) == 3 && os.Args[1] == "--json" {
+		jsonOutput = true
+		filename = os.Args[2]
+	} else if len(os.Args) == 2 {
+		jsonOutput = false
+		filename = os.Args[1]
+	} else {
+		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <midi_file>\n", os.Args[0])
+		os.Exit(1)
+	}
+	
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	smfData, err := smf.ReadFrom(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading MIDI file: %v\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		jsonData, err := json.MarshalIndent(smfData, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling to JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(jsonData))
+		return
+	}
+
+	fmt.Printf("MIDI File: %s\n", filename)
+	fmt.Printf("Format: %d\n", smfData.Format())
+	if tf, ok := smfData.TimeFormat.(smf.MetricTicks); ok {
+		fmt.Printf("Ticks per quarter note: %d\n", tf)
+	} else {
+		fmt.Printf("Time format: %v\n", smfData.TimeFormat)
+	}
+	fmt.Printf("Number of tracks: %d\n", len(smfData.Tracks))
+	fmt.Println()
+
+	for i, track := range smfData.Tracks {
+		trackName := getTrackName(track)
+		if trackName != "" {
+			fmt.Printf("Track %d: %s\n", i, trackName)
+		} else {
+			fmt.Printf("Track %d:\n", i)
+		}
+		fmt.Printf("  Number of events: %d\n", len(track))
+		
+		if len(track) == 0 {
+			fmt.Println("  (empty track)")
+			continue
+		}
+
+		var noteCount, ccCount, pgmCount int
+		var firstTime, lastTime uint32
+		var channels = make(map[uint8]bool)
+		var instruments = make(map[uint8]string)
+		
+		firstTime = track[0].Delta
+		lastTime = firstTime
+		currentTime := firstTime
+
+		for _, event := range track {
+			currentTime += event.Delta
+			lastTime = currentTime
+
+			msg := event.Message
+			
+			var ch, key, vel uint8
+			if msg.GetNoteOn(&ch, &key, &vel) {
+				noteCount++
+				channels[ch] = true
+			} else if msg.GetNoteOff(&ch, &key, &vel) {
+				channels[ch] = true
+			} else if msg.GetControlChange(&ch, &key, &vel) {
+				ccCount++
+				channels[ch] = true
+			} else if msg.GetProgramChange(&ch, &vel) {
+				pgmCount++
+				channels[ch] = true
+				instruments[ch] = getGMInstrument(vel)
+			}
+		}
+
+		duration := lastTime - firstTime
+		var durationMs float64
+		if tf, ok := smfData.TimeFormat.(smf.MetricTicks); ok {
+			durationMs = float64(duration) / float64(tf) * 500 // Assuming 120 BPM
+		}
+		
+		fmt.Printf("  Duration: %d ticks (%.2f seconds @ 120 BPM)\n", duration, durationMs/1000)
+		fmt.Printf("  Note events: %d\n", noteCount)
+		fmt.Printf("  Control change events: %d\n", ccCount)
+		fmt.Printf("  Program change events: %d\n", pgmCount)
+		
+		if len(channels) > 0 {
+			fmt.Printf("  Channels used: ")
+			first := true
+			for ch := range channels {
+				if !first {
+					fmt.Printf(", ")
+				}
+				fmt.Printf("%d", ch)
+				first = false
+			}
+			fmt.Println()
+		}
+		
+		if len(instruments) > 0 {
+			fmt.Println("  Instruments:")
+			for ch, inst := range instruments {
+				fmt.Printf("    Channel %d: %s\n", ch, inst)
+			}
+		}
+		
+		fmt.Println()
+	}
+}
+
+func getTrackName(track smf.Track) string {
+	for _, event := range track {
+		msg := event.Message
+		
+		var trackName string
+		if msg.GetMetaTrackName(&trackName) {
+			return trackName
+		}
+		
+		var text string
+		if msg.GetMetaText(&text) {
+			return text
+		}
+	}
+	return ""
+}
+
+func getGMInstrument(program uint8) string {
+	instruments := []string{
+		"Acoustic Grand Piano", "Bright Acoustic Piano", "Electric Grand Piano", "Honky-tonk Piano",
+		"Electric Piano 1", "Electric Piano 2", "Harpsichord", "Clavi",
+		"Celesta", "Glockenspiel", "Music Box", "Vibraphone",
+		"Marimba", "Xylophone", "Tubular Bells", "Dulcimer",
+		"Drawbar Organ", "Percussive Organ", "Rock Organ", "Church Organ",
+		"Reed Organ", "Accordion", "Harmonica", "Tango Accordion",
+		"Acoustic Guitar (nylon)", "Acoustic Guitar (steel)", "Electric Guitar (jazz)", "Electric Guitar (clean)",
+		"Electric Guitar (muted)", "Overdriven Guitar", "Distortion Guitar", "Guitar Harmonics",
+		"Acoustic Bass", "Electric Bass (finger)", "Electric Bass (pick)", "Fretless Bass",
+		"Slap Bass 1", "Slap Bass 2", "Synth Bass 1", "Synth Bass 2",
+		"Violin", "Viola", "Cello", "Contrabass",
+		"Tremolo Strings", "Pizzicato Strings", "Orchestral Harp", "Timpani",
+		"String Ensemble 1", "String Ensemble 2", "Synth Strings 1", "Synth Strings 2",
+		"Choir Aahs", "Voice Oohs", "Synth Voice", "Orchestra Hit",
+		"Trumpet", "Trombone", "Tuba", "Muted Trumpet",
+		"French Horn", "Brass Section", "Synth Brass 1", "Synth Brass 2",
+		"Soprano Sax", "Alto Sax", "Tenor Sax", "Baritone Sax",
+		"Oboe", "English Horn", "Bassoon", "Clarinet",
+		"Piccolo", "Flute", "Recorder", "Pan Flute",
+		"Blown Bottle", "Shakuhachi", "Whistle", "Ocarina",
+		"Lead 1 (square)", "Lead 2 (sawtooth)", "Lead 3 (calliope)", "Lead 4 (chiff)",
+		"Lead 5 (charang)", "Lead 6 (voice)", "Lead 7 (fifths)", "Lead 8 (bass + lead)",
+		"Pad 1 (new age)", "Pad 2 (warm)", "Pad 3 (polysynth)", "Pad 4 (choir)",
+		"Pad 5 (bowed)", "Pad 6 (metallic)", "Pad 7 (halo)", "Pad 8 (sweep)",
+		"FX 1 (rain)", "FX 2 (soundtrack)", "FX 3 (crystal)", "FX 4 (atmosphere)",
+		"FX 5 (brightness)", "FX 6 (goblins)", "FX 7 (echoes)", "FX 8 (sci-fi)",
+		"Sitar", "Banjo", "Shamisen", "Koto",
+		"Kalimba", "Bag pipe", "Fiddle", "Shanai",
+		"Tinkle Bell", "Agogo", "Steel Drums", "Woodblock",
+		"Taiko Drum", "Melodic Tom", "Synth Drum", "Reverse Cymbal",
+		"Guitar Fret Noise", "Breath Noise", "Seashore", "Bird Tweet",
+		"Telephone Ring", "Helicopter", "Applause", "Gunshot",
+	}
+	
+	if int(program) < len(instruments) {
+		return instruments[program]
+	}
+	return fmt.Sprintf("Unknown (%d)", program)
+}
