@@ -70,10 +70,11 @@ func main() {
 			continue
 		}
 
-		var noteCount, ccCount, pgmCount int
+		var noteCount, ccCount, pgmCount, lyricCount int
 		var firstTime, lastTime uint32
 		var channels = make(map[uint8]bool)
 		var instruments = make(map[uint8]string)
+		var lyrics []string
 		
 		firstTime = track[0].Delta
 		lastTime = firstTime
@@ -86,6 +87,7 @@ func main() {
 			msg := event.Message
 			
 			var ch, key, vel uint8
+			var lyric, text string
 			if msg.GetNoteOn(&ch, &key, &vel) {
 				noteCount++
 				channels[ch] = true
@@ -98,6 +100,15 @@ func main() {
 				pgmCount++
 				channels[ch] = true
 				instruments[ch] = getGMInstrument(vel)
+			} else if msg.GetMetaLyric(&lyric) {
+				lyricCount++
+				lyrics = append(lyrics, lyric)
+			} else if msg.GetMetaText(&text) {
+				// Skip bracketed animation markers, look for actual lyrics
+				if len(text) > 0 && text[0] != '[' {
+					lyricCount++
+					lyrics = append(lyrics, text)
+				}
 			}
 		}
 
@@ -111,6 +122,19 @@ func main() {
 		fmt.Printf("  Note events: %d\n", noteCount)
 		fmt.Printf("  Control change events: %d\n", ccCount)
 		fmt.Printf("  Program change events: %d\n", pgmCount)
+		if lyricCount > 0 {
+			fmt.Printf("  Lyric events: %d\n", lyricCount)
+			if len(lyrics) > 0 {
+				fmt.Printf("  Lyrics: ")
+				for j, lyric := range lyrics {
+					if j > 0 {
+						fmt.Printf(" ")
+					}
+					fmt.Printf("%s", lyric)
+				}
+				fmt.Println()
+			}
+		}
 		
 		if len(channels) > 0 {
 			fmt.Printf("  Channels used: ")
