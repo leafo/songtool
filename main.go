@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
 )
@@ -22,7 +23,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <midi_file>\n", os.Args[0])
 		os.Exit(1)
 	}
-	
+
 	file, err := os.Open(filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
@@ -64,7 +65,7 @@ func main() {
 			fmt.Printf("Track %d:\n", i)
 		}
 		fmt.Printf("  Number of events: %d\n", len(track))
-		
+
 		if len(track) == 0 {
 			fmt.Println("  (empty track)")
 			continue
@@ -75,7 +76,7 @@ func main() {
 		var channels = make(map[uint8]bool)
 		var instruments = make(map[uint8]string)
 		var lyrics []string
-		
+
 		firstTime = track[0].Delta
 		lastTime = firstTime
 		currentTime := firstTime
@@ -85,7 +86,7 @@ func main() {
 			lastTime = currentTime
 
 			msg := event.Message
-			
+
 			var ch, key, vel uint8
 			var lyric, text string
 			if msg.GetNoteOn(&ch, &key, &vel) {
@@ -117,7 +118,7 @@ func main() {
 		if tf, ok := smfData.TimeFormat.(smf.MetricTicks); ok {
 			durationMs = float64(duration) / float64(tf) * 500 // Assuming 120 BPM
 		}
-		
+
 		fmt.Printf("  Duration: %d ticks (%.2f seconds @ 120 BPM)\n", duration, durationMs/1000)
 		fmt.Printf("  Note events: %d\n", noteCount)
 		fmt.Printf("  Control change events: %d\n", ccCount)
@@ -125,17 +126,11 @@ func main() {
 		if lyricCount > 0 {
 			fmt.Printf("  Lyric events: %d\n", lyricCount)
 			if len(lyrics) > 0 {
-				fmt.Printf("  Lyrics: ")
-				for j, lyric := range lyrics {
-					if j > 0 {
-						fmt.Printf(" ")
-					}
-					fmt.Printf("%s", lyric)
-				}
-				fmt.Println()
+				cleanLyrics := parseRockBandLyrics(lyrics)
+				fmt.Printf("  Lyrics: %s\n", cleanLyrics)
 			}
 		}
-		
+
 		if len(channels) > 0 {
 			fmt.Printf("  Channels used: ")
 			first := true
@@ -148,14 +143,14 @@ func main() {
 			}
 			fmt.Println()
 		}
-		
+
 		if len(instruments) > 0 {
 			fmt.Println("  Instruments:")
 			for ch, inst := range instruments {
 				fmt.Printf("    Channel %d: %s\n", ch, inst)
 			}
 		}
-		
+
 		fmt.Println()
 	}
 }
@@ -163,12 +158,12 @@ func main() {
 func getTrackName(track smf.Track) string {
 	for _, event := range track {
 		msg := event.Message
-		
+
 		var trackName string
 		if msg.GetMetaTrackName(&trackName) {
 			return trackName
 		}
-		
+
 		var text string
 		if msg.GetMetaText(&text) {
 			return text
@@ -212,9 +207,72 @@ func getGMInstrument(program uint8) string {
 		"Guitar Fret Noise", "Breath Noise", "Seashore", "Bird Tweet",
 		"Telephone Ring", "Helicopter", "Applause", "Gunshot",
 	}
-	
+
 	if int(program) < len(instruments) {
 		return instruments[program]
 	}
 	return fmt.Sprintf("Unknown (%d)", program)
+}
+
+func parseRockBandLyrics(rawLyrics []string) string {
+	var result []string
+	var currentWord strings.Builder
+
+	for _, lyric := range rawLyrics {
+		if lyric == "" {
+			continue
+		}
+
+		// Skip if it's just a "+" (syllable continuation marker)
+		if lyric == "+" {
+			continue
+		}
+
+		// Clean up the lyric text
+		cleaned := lyric
+
+		// Remove non-pitched markers (#, ^) and range dividers (%)
+		cleaned = strings.TrimSuffix(cleaned, "#")
+		cleaned = strings.TrimSuffix(cleaned, "^")
+		cleaned = strings.TrimSuffix(cleaned, "%")
+
+		// Handle actual hyphens (= becomes -)
+		cleaned = strings.ReplaceAll(cleaned, "=", "-")
+
+		// Check if this syllable continues with "+"
+		isSlideNote := strings.HasSuffix(cleaned, "+")
+		if isSlideNote {
+			cleaned = strings.TrimSuffix(cleaned, "+")
+			cleaned = strings.TrimSpace(cleaned)
+		}
+
+		// Check if this is a syllable continuation (starts with hyphen after cleaning markers)
+		isSyllableContinuation := strings.HasSuffix(cleaned, "-")
+		if isSyllableContinuation {
+			cleaned = strings.TrimSuffix(cleaned, "-")
+			cleaned = strings.TrimSpace(cleaned)
+		}
+
+		// Add to current word
+		currentWord.WriteString(cleaned)
+
+		// If this syllable doesn't continue to next (no trailing hyphen), complete the word
+		if !isSyllableContinuation && !isSlideNote {
+			word := currentWord.String()
+			if word != "" {
+				result = append(result, word)
+			}
+			currentWord.Reset()
+		}
+	}
+
+	// Handle any remaining word
+	if currentWord.Len() > 0 {
+		word := currentWord.String()
+		if word != "" {
+			result = append(result, word)
+		}
+	}
+
+	return strings.Join(result, " ")
 }
