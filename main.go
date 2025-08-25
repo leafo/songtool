@@ -100,11 +100,10 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 			continue
 		}
 
-		var noteCount, ccCount, pgmCount, lyricCount int
+		var noteCount, ccCount, pgmCount int
 		var firstTime, lastTime uint32
 		var channels = make(map[uint8]bool)
 		var instruments = make(map[uint8]string)
-		var lyrics []string
 
 		firstTime = track[0].Delta
 		lastTime = firstTime
@@ -117,7 +116,7 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 			msg := event.Message
 
 			var ch, key, vel uint8
-			var lyric, text string
+
 			if msg.GetNoteOn(&ch, &key, &vel) {
 				noteCount++
 				channels[ch] = true
@@ -130,15 +129,6 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 				pgmCount++
 				channels[ch] = true
 				instruments[ch] = getGMInstrument(vel)
-			} else if msg.GetMetaLyric(&lyric) {
-				lyricCount++
-				lyrics = append(lyrics, lyric)
-			} else if msg.GetMetaText(&text) {
-				// Skip bracketed animation markers, look for actual lyrics
-				if len(text) > 0 && text[0] != '[' {
-					lyricCount++
-					lyrics = append(lyrics, text)
-				}
 			}
 		}
 
@@ -152,12 +142,9 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 		fmt.Printf("  Note events: %d\n", noteCount)
 		fmt.Printf("  Control change events: %d\n", ccCount)
 		fmt.Printf("  Program change events: %d\n", pgmCount)
-		if lyricCount > 0 {
-			fmt.Printf("  Lyric events: %d\n", lyricCount)
-			if len(lyrics) > 0 {
-				cleanLyrics := parseRockBandLyrics(lyrics)
-				fmt.Printf("  Lyrics: %s\n", cleanLyrics)
-			}
+		cleanLyrics := extractLyrics(track)
+		if cleanLyrics != "" {
+			fmt.Printf("  Lyrics: %s\n", cleanLyrics)
 		}
 
 		if len(channels) > 0 {
@@ -199,69 +186,6 @@ func getTrackName(track smf.Track) string {
 		}
 	}
 	return ""
-}
-
-func parseRockBandLyrics(rawLyrics []string) string {
-	var result []string
-	var currentWord strings.Builder
-
-	for _, lyric := range rawLyrics {
-		if lyric == "" {
-			continue
-		}
-
-		// Skip if it's just a "+" (syllable continuation marker)
-		if lyric == "+" {
-			continue
-		}
-
-		// Clean up the lyric text
-		cleaned := lyric
-
-		// Remove non-pitched markers (#, ^) and range dividers (%)
-		cleaned = strings.TrimSuffix(cleaned, "#")
-		cleaned = strings.TrimSuffix(cleaned, "^")
-		cleaned = strings.TrimSuffix(cleaned, "%")
-
-		// Handle actual hyphens (= becomes -)
-		cleaned = strings.ReplaceAll(cleaned, "=", "-")
-
-		// Check if this syllable continues with "+"
-		isSlideNote := strings.HasSuffix(cleaned, "+")
-		if isSlideNote {
-			cleaned = strings.TrimSuffix(cleaned, "+")
-			cleaned = strings.TrimSpace(cleaned)
-		}
-
-		// Check if this is a syllable continuation (starts with hyphen after cleaning markers)
-		isSyllableContinuation := strings.HasSuffix(cleaned, "-")
-		if isSyllableContinuation {
-			cleaned = strings.TrimSuffix(cleaned, "-")
-			cleaned = strings.TrimSpace(cleaned)
-		}
-
-		// Add to current word
-		currentWord.WriteString(cleaned)
-
-		// If this syllable doesn't continue to next (no trailing hyphen), complete the word
-		if !isSyllableContinuation && !isSlideNote {
-			word := currentWord.String()
-			if word != "" {
-				result = append(result, word)
-			}
-			currentWord.Reset()
-		}
-	}
-
-	// Handle any remaining word
-	if currentWord.Len() > 0 {
-		word := currentWord.String()
-		if word != "" {
-			result = append(result, word)
-		}
-	}
-
-	return strings.Join(result, " ")
 }
 
 func handleSngFile(filename string, jsonOutput bool, exportDrums bool) {

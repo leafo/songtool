@@ -12,8 +12,8 @@ import (
 	"gitlab.com/gomidi/midi/v2/smf"
 )
 
-const gmDrumChannel uint8 = 9      // default percussion channel in GM
-const hitDurationTicks uint32 = 48 // TODO: figure out better way to do note duration
+const gmDrumChannel uint8 = 9       // default percussion channel in GM
+const hitDurationTicks uint32 = 120 // a 16th note at 480 ticks per quarter note
 
 // all of these mapping are from the Expert drum range
 // **MIDI Range:** 96 (C6) - 100 (E6)
