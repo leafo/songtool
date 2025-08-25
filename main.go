@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
@@ -20,8 +22,14 @@ func main() {
 		jsonOutput = false
 		filename = os.Args[1]
 	} else {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <midi_file>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <file>\n", os.Args[0])
 		os.Exit(1)
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == ".sng" {
+		handleSngFile(filename, jsonOutput)
+		return
 	}
 
 	file, err := os.Open(filename)
@@ -37,6 +45,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	printMidiInfo(smfData, filename, jsonOutput)
+}
+
+func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 	if jsonOutput {
 		jsonData, err := json.MarshalIndent(smfData, "", "  ")
 		if err != nil {
@@ -275,4 +287,64 @@ func parseRockBandLyrics(rawLyrics []string) string {
 	}
 
 	return strings.Join(result, " ")
+}
+
+func handleSngFile(filename string, jsonOutput bool) {
+	sng, err := OpenSngFile(filename)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening SNG file: %v\n", err)
+		os.Exit(1)
+	}
+	defer sng.Close()
+
+	if jsonOutput {
+		output := map[string]interface{}{
+			"header":   sng.Header,
+			"metadata": sng.GetMetadata(),
+			"files":    sng.Files,
+		}
+		jsonData, err := json.MarshalIndent(output, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling to JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(jsonData))
+		return
+	}
+
+	fmt.Printf("SNG File: %s\n", filename)
+	fmt.Printf("Version: %d\n", sng.Header.Version)
+	fmt.Println()
+
+	metadata := sng.GetMetadata()
+	if len(metadata) > 0 {
+		fmt.Println("Metadata:")
+		for key, value := range metadata {
+			fmt.Printf("  %s: %s\n", key, value)
+		}
+		fmt.Println()
+	}
+
+	files := sng.ListFiles()
+	fmt.Printf("Contains %d files:\n", len(files))
+	for i, filename := range files {
+		entry := sng.Files[i]
+		fmt.Printf("  %s (%d bytes)\n", filename, entry.Size)
+	}
+	fmt.Println()
+
+	// Try to read and parse the MIDI file
+	midiData, err := sng.ReadFile("notes.mid")
+	if err != nil {
+		fmt.Printf("No MIDI file found in SNG package\n")
+		return
+	}
+
+	smfData, err := smf.ReadFrom(bytes.NewReader(midiData))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading MIDI data: %v\n", err)
+		return
+	}
+
+	printMidiInfo(smfData, "notes.mid (from SNG)", jsonOutput)
 }
