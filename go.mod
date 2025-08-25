@@ -1,4 +1,4 @@
-module leafo.net/songtool
+module github.com/leafo/songtool
 
 go 1.25.0
 
