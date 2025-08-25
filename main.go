@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,36 +13,21 @@ import (
 )
 
 func main() {
-	var jsonOutput bool
-	var exportDrums bool
-	var filename string
+	jsonOutput := flag.Bool("json", false, "Output MIDI information as JSON")
+	exportDrums := flag.Bool("export-drums", false, "Export drum patterns from MIDI file")
+	flag.Parse()
 
-	// Parse command line arguments
-	args := os.Args[1:]
-	for _, arg := range args {
-		switch arg {
-		case "--json":
-			jsonOutput = true
-		case "--export-drums":
-			exportDrums = true
-		default:
-			if filename == "" {
-				filename = arg
-			} else {
-				fmt.Fprintf(os.Stderr, "Usage: %s [--json] [--export-drums] <file>\n", os.Args[0])
-				os.Exit(1)
-			}
-		}
-	}
-
-	if filename == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--json] [--export-drums] <file>\n", os.Args[0])
+	if flag.NArg() != 1 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <file>\n", os.Args[0])
+		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
+	filename := flag.Arg(0)
+
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == ".sng" {
-		handleSngFile(filename, jsonOutput, exportDrums)
+		handleSngFile(filename, *jsonOutput, *exportDrums)
 		return
 	}
 
@@ -58,10 +44,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if exportDrums {
+	if *exportDrums {
 		ExportDrumsFromMidi(smfData, filename)
 	} else {
-		printMidiInfo(smfData, filename, jsonOutput)
+		printMidiInfo(smfData, filename, *jsonOutput)
 	}
 }
 
