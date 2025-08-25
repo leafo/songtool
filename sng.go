@@ -1,3 +1,46 @@
+// Package main provides functionality for reading SNG (Song Package) files.
+//
+// SNG files are binary container formats used in music games to store complete
+// song packages including chart files, audio stems, images, and metadata.
+// All file data is XOR-masked for simple obfuscation.
+//
+// Basic Usage:
+//
+//	// Open an SNG file
+//	sng, err := OpenSngFile("song.sng")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer sng.Close()
+//
+//	// Get metadata
+//	metadata := sng.GetMetadata()
+//	fmt.Printf("Song: %s by %s\n", metadata["name"], metadata["artist"])
+//
+//	// List contained files
+//	files := sng.ListFiles()
+//	for _, filename := range files {
+//		fmt.Println("Contains:", filename)
+//	}
+//
+//	// Read a specific file
+//	midiData, err := sng.ReadFile("notes.mid")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	fmt.Printf("MIDI file size: %d bytes\n", len(midiData))
+//
+// File Format:
+//
+// SNG files contain four main sections:
+//   - Header: File identifier, version, and XOR mask
+//   - Metadata: Key-value pairs with song information
+//   - File Index: List of contained files with sizes and offsets
+//   - File Data: XOR-masked file contents
+//
+// The XOR masking uses a lookup table approach where each byte is masked
+// based on its position within the individual file and a 16-byte mask
+// from the header.
 package main
 
 import (
@@ -8,31 +51,42 @@ import (
 )
 
 const (
+	// SngFileIdentifier is the magic bytes that identify an SNG file
 	SngFileIdentifier = "SNGPKG"
-	SngHeaderSize     = 26
+	// SngHeaderSize is the size of the SNG file header in bytes
+	SngHeaderSize = 26
 )
 
+// SngHeader represents the SNG file header containing identification and XOR mask
 type SngHeader struct {
-	Identifier [6]byte
-	Version    uint32
-	XorMask    [16]byte
+	Identifier [6]byte  // Must be "SNGPKG"
+	Version    uint32   // Format version (currently 1)
+	XorMask    [16]byte // 16-byte mask for XOR operations
 }
 
+// SngMetadata represents key-value pairs of song metadata
 type SngMetadata map[string]string
 
+// SngFileEntry represents a file contained within the SNG package
 type SngFileEntry struct {
-	Filename string
-	Size     uint64
-	Offset   uint64
+	Filename string // Name of the file
+	Size     uint64 // Size of the file data in bytes
+	Offset   uint64 // Absolute offset to the file data within the SNG file
 }
 
+// SngFile represents an opened SNG file with its header, metadata, file index, and reader
 type SngFile struct {
-	Header   SngHeader
-	Metadata SngMetadata
-	Files    []SngFileEntry
-	reader   *os.File
+	Header   SngHeader      // SNG file header
+	Metadata SngMetadata    // Song metadata key-value pairs
+	Files    []SngFileEntry // Index of contained files
+	reader   *os.File       // File reader for accessing file data
 }
 
+// OpenSngFile opens an SNG file for reading and parses its header, metadata, and file index.
+// The returned SngFile must be closed with Close() when finished.
+//
+// Returns an error if the file cannot be opened, is not a valid SNG file,
+// or if any section cannot be parsed correctly.
 func OpenSngFile(filename string) (*SngFile, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -62,6 +116,8 @@ func OpenSngFile(filename string) (*SngFile, error) {
 	return sng, nil
 }
 
+// Close closes the underlying file reader. It should be called when finished
+// with the SngFile to free system resources.
 func (s *SngFile) Close() error {
 	if s.reader != nil {
 		return s.reader.Close()
@@ -175,6 +231,8 @@ func (s *SngFile) readFileIndex() error {
 	return nil
 }
 
+// ListFiles returns a slice containing the filenames of all files stored in the SNG package.
+// The order matches the order in the file index.
 func (s *SngFile) ListFiles() []string {
 	files := make([]string, len(s.Files))
 	for i, entry := range s.Files {
@@ -183,6 +241,16 @@ func (s *SngFile) ListFiles() []string {
 	return files
 }
 
+// ReadFile extracts and returns the contents of the specified file from the SNG package.
+// The file data is automatically unmasked using the XOR algorithm.
+//
+// Returns an error if the file is not found in the package or if there's an I/O error.
+//
+// Common files found in SNG packages include:
+//   - "notes.mid" - MIDI chart data
+//   - "song.opus", "guitar.opus", etc. - Audio stems
+//   - "album.jpg" - Album artwork
+//   - "song.ini" - Additional metadata
 func (s *SngFile) ReadFile(filename string) ([]byte, error) {
 	var entry *SngFileEntry
 	for i := range s.Files {
@@ -208,6 +276,9 @@ func (s *SngFile) ReadFile(filename string) ([]byte, error) {
 	return s.unmaskData(maskedData), nil
 }
 
+// unmaskData applies a XOR unmasking algorithm to decode file data.
+// The algorithm uses a 256-byte lookup table created from the 16-byte XOR mask
+// in the header. Each byte is unmasked based on its position within the file.
 func (s *SngFile) unmaskData(maskedData []byte) []byte {
 	lookup := make([]byte, 256)
 	for i := 0; i < 256; i++ {
@@ -222,6 +293,19 @@ func (s *SngFile) unmaskData(maskedData []byte) []byte {
 	return unmaskedData
 }
 
+// GetMetadata returns a copy of all metadata key-value pairs from the SNG file.
+// The returned map is safe to modify without affecting the original SngFile.
+//
+// Common metadata keys include:
+//   - "name" - Song title
+//   - "artist" - Artist name
+//   - "album" - Album name
+//   - "genre" - Musical genre
+//   - "year" - Release year
+//   - "charter" - Chart creator
+//   - "song_length" - Duration in milliseconds
+//   - "diff_guitar", "diff_bass", etc. - Difficulty ratings (0-7)
+//   - "preview_start_time" - Preview start time in milliseconds
 func (s *SngFile) GetMetadata() SngMetadata {
 	result := make(SngMetadata)
 	for k, v := range s.Metadata {
