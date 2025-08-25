@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,29 +26,64 @@ func main() {
 
 	filename := flag.Arg(0)
 
+	var sngFile *SngFile
+	var midiFile *smf.SMF
+	var err error
+
 	ext := strings.ToLower(filepath.Ext(filename))
+
 	if ext == ".sng" {
-		handleSngFile(filename, *jsonOutput, *exportDrums)
-		return
-	}
+		sngFile, err = OpenSngFile(filename)
 
-	file, err := os.Open(filename)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
-		os.Exit(1)
-	}
-	defer file.Close()
+		if err != nil {
+			log.Printf("Error opening SNG file: %v\n", err)
+			os.Exit(1)
+		}
 
-	smfData, err := smf.ReadFrom(file)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading MIDI file: %v\n", err)
-		os.Exit(1)
+		defer sngFile.Close()
+
+		// load the midi file in it
+
+		midiData, err := sngFile.ReadFile("notes.mid")
+
+		if err != nil {
+			log.Printf("No MIDI file found in SNG package\n")
+		} else {
+			midiFile, err = smf.ReadFrom(bytes.NewReader(midiData))
+			if err != nil {
+				log.Printf("Error reading MIDI data: %v\n", err)
+			}
+		}
+	} else {
+		// treat the file as a regular midi file
+
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Printf("Error opening file: %v\n", err)
+			os.Exit(1)
+		}
+		defer file.Close()
+
+		midiFile, err = smf.ReadFrom(file)
+		if err != nil {
+			log.Printf("Error reading MIDI file: %v\n", err)
+			os.Exit(1)
+		}
+
 	}
 
 	if *exportDrums {
-		ExportDrumsFromMidi(smfData, filename)
+		ExportDrumsFromMidi(midiFile, filename)
 	} else {
-		printMidiInfo(smfData, filename, *jsonOutput)
+		if sngFile != nil {
+			printSngFile(sngFile, *jsonOutput)
+
+			if *jsonOutput {
+				return
+			}
+		}
+
+		printMidiInfo(midiFile, filename, *jsonOutput)
 	}
 }
 
@@ -55,7 +91,7 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 	if jsonOutput {
 		jsonData, err := json.MarshalIndent(smfData, "", "  ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling to JSON: %v\n", err)
+			log.Printf("Error marshaling to JSON: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(string(jsonData))
@@ -174,34 +210,26 @@ func getTrackName(track smf.Track) string {
 	return ""
 }
 
-func handleSngFile(filename string, jsonOutput bool, exportDrums bool) {
-	sng, err := OpenSngFile(filename)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening SNG file: %v\n", err)
-		os.Exit(1)
-	}
-	defer sng.Close()
-
+func printSngFile(sngFile *SngFile, jsonOutput bool) {
 	if jsonOutput {
 		output := map[string]interface{}{
-			"header":   sng.Header,
-			"metadata": sng.GetMetadata(),
-			"files":    sng.Files,
+			"header":   sngFile.Header,
+			"metadata": sngFile.GetMetadata(),
+			"files":    sngFile.Files,
 		}
 		jsonData, err := json.MarshalIndent(output, "", "  ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error marshaling to JSON: %v\n", err)
+			log.Printf("Error marshaling to JSON: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(string(jsonData))
 		return
 	}
 
-	fmt.Printf("SNG File: %s\n", filename)
-	fmt.Printf("Version: %d\n", sng.Header.Version)
+	fmt.Printf("Version: %d\n", sngFile.Header.Version)
 	fmt.Println()
 
-	metadata := sng.GetMetadata()
+	metadata := sngFile.GetMetadata()
 	if len(metadata) > 0 {
 		fmt.Println("Metadata:")
 		for key, value := range metadata {
@@ -210,30 +238,11 @@ func handleSngFile(filename string, jsonOutput bool, exportDrums bool) {
 		fmt.Println()
 	}
 
-	files := sng.ListFiles()
+	files := sngFile.ListFiles()
 	fmt.Printf("Contains %d files:\n", len(files))
 	for i, filename := range files {
-		entry := sng.Files[i]
+		entry := sngFile.Files[i]
 		fmt.Printf("  %s (%d bytes)\n", filename, entry.Size)
 	}
 	fmt.Println()
-
-	// Try to read and parse the MIDI file
-	midiData, err := sng.ReadFile("notes.mid")
-	if err != nil {
-		fmt.Printf("No MIDI file found in SNG package\n")
-		return
-	}
-
-	smfData, err := smf.ReadFrom(bytes.NewReader(midiData))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading MIDI data: %v\n", err)
-		return
-	}
-
-	if exportDrums {
-		ExportDrumsFromMidi(smfData, "notes.mid (from SNG)")
-	} else {
-		printMidiInfo(smfData, "notes.mid (from SNG)", jsonOutput)
-	}
 }
