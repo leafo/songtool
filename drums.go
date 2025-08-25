@@ -1,0 +1,288 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"gitlab.com/gomidi/midi/v2"
+	"gitlab.com/gomidi/midi/v2/smf"
+)
+
+const gmDrumChannel uint8 = 9      // default percussion channel in GM
+const hitDurationTicks uint32 = 48 // TODO: figure out better way to do note duration
+
+// all of these mapping are from the Expert drum range
+// **MIDI Range:** 96 (C6) - 100 (E6)
+
+// GM Drum mapping for standard MIDI drums
+var gmDrumMap = map[uint8]uint8{
+	96: BassDrum1,     // Kick Drum -> Bass Drum 1 (GM)
+	97: AcousticSnare, // Snare Drum -> Acoustic Snare (GM)
+
+	98:  ClosedHiHat,  // Hi-Hat -> Closed Hi Hat
+	99:  RideCymbal1,  // Ride -> Ride Cymbal 1
+	100: CrashCymbal1, // Crash -> Crash Cymbal 1
+}
+
+// GM mapping when tom modifier is applied (pro drums)
+var gmTomMap = map[uint8]uint8{
+	98:  LowMidTom,   // Hi-Hat -> Mid Tom 1 (when tom modifier active)
+	99:  LowTom,      // Ride -> Low Tom (when tom modifier active)
+	100: LowFloorTom, // Crash -> Low Floor Tom (when tom modifier active)
+}
+
+// DrumNote represents a single drum hit with timing and velocity
+type DrumNote struct {
+	Time          uint32
+	Key           uint8 // the raw key event from rockband
+	Velocity      uint8
+	IsTomModified bool // For Pro Drums: true if this note should be a tom instead of cymbal
+}
+
+// TomModifier represents a Pro Drums tom modifier event that converts a cymbol into a tom drum
+// Only applies to the notes that match Pad color
+type TomModifier struct {
+	StartTime uint32
+	EndTime   uint32
+	Pad       uint8 // 98 (yellow), 99 (blue), 100 (green)
+}
+
+// converts a DrumNote to general MIDI key
+func (dn *DrumNote) toMidiKey() (uint8, error) {
+	var gmKey uint8
+
+	if dn.IsTomModified {
+		if gmKeyVal, ok := gmTomMap[dn.Key]; ok {
+			gmKey = gmKeyVal
+		} else {
+			return 0, fmt.Errorf("error: failed to get tom modified GM MIDI note for %d", dn.Key)
+		}
+	} else {
+		if gmKeyVal, ok := gmDrumMap[dn.Key]; ok {
+			gmKey = gmKeyVal
+		} else {
+			return 0, fmt.Errorf("error: failed to get GM MIDI note for %d", dn.Key)
+		}
+	}
+
+	return gmKey, nil
+}
+
+// ExportDrumsFromMidi extracts expert difficulty drums from a Rock Band MIDI file
+// and converts them to GM standard drums, outputting a new MIDI file
+func ExportDrumsFromMidi(smfData *smf.SMF, sourceFilename string) {
+	// Find the PART DRUMS track
+	var drumTrack smf.Track
+	var drumTrackFound bool
+
+	for _, track := range smfData.Tracks {
+		trackName := getTrackName(track)
+		if trackName == "PART DRUMS" {
+			drumTrack = track
+			drumTrackFound = true
+			break
+		}
+	}
+
+	if !drumTrackFound {
+		fmt.Fprintf(os.Stderr, "Error: No 'PART DRUMS' track found\n")
+		os.Exit(1)
+	}
+
+	// Extract Expert difficulty drum notes (MIDI range 96-100)
+	expertDrumNotes := extractDrumNotes(drumTrack)
+
+	if len(expertDrumNotes) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: No expert drum notes found\n")
+		os.Exit(1)
+	}
+
+	// Create new MIDI file with GM drums (Format 1 - multi-track)
+	newSMF := smf.NewSMF1()
+
+	// Track 0: Copy tempo/conductor information from original MIDI
+	tempoTrack := extractTempoTrack(smfData)
+	newSMF.Add(tempoTrack)
+
+	// Track 1: Drums track
+	drumsTrack := smf.Track{}
+
+	// Add track name meta event
+	trackNameMsg := smf.Message(smf.MetaTrackSequenceName("Drums"))
+	drumsTrack = append(drumsTrack, smf.Event{Delta: 0, Message: trackNameMsg})
+
+	// Convert and add drum notes
+	for _, note := range expertDrumNotes {
+		// Convert to GM drums (handles both regular and Pro Drums)
+		gmNote, err := note.toMidiKey()
+
+		if err != nil {
+			log.Printf("Error converting drum note to General MIDI key: %v\n", err)
+			continue
+		}
+
+		// Note On event
+		noteOnMsg := smf.Message(midi.NoteOn(gmDrumChannel, gmNote, note.Velocity))
+		drumsTrack = append(drumsTrack, smf.Event{Delta: note.Time, Message: noteOnMsg})
+
+		// Note Off event
+		noteOffMsg := smf.Message(midi.NoteOff(gmDrumChannel, gmNote))
+		drumsTrack = append(drumsTrack, smf.Event{Delta: hitDurationTicks, Message: noteOffMsg})
+	}
+
+	// Add end of track meta event to drums track
+	drumsTrack = append(drumsTrack, smf.Event{Delta: 0, Message: smf.EOT})
+	newSMF.Add(drumsTrack)
+
+	// Generate output filename
+	outputFile := generateDrumOutputFilename(sourceFilename)
+
+	// Write the new MIDI file
+	file, err := os.Create(outputFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	_, err = newSMF.WriteTo(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing MIDI file: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Drums exported to: %s\n", outputFile)
+	fmt.Printf("Converted %d drum notes from expert difficulty\n", len(expertDrumNotes))
+}
+
+// extractDrumNotes finds all expert difficulty drum notes (96-100) in the drum track
+// Handles both regular drums and Pro Drums with tom modifiers
+func extractDrumNotes(drumTrack smf.Track) []DrumNote {
+	var drumNotes []DrumNote
+	var tomModifiers []TomModifier
+	var currentTime uint32
+
+	isTomModified := func(time uint32, key uint8) bool {
+		for _, modifier := range tomModifiers {
+			if modifier.Pad == key &&
+				time >= modifier.StartTime &&
+				time <= modifier.EndTime &&
+				(key == 98 || key == 99 || key == 100) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// first pass: collect all tom modifier events and ranges
+	for _, event := range drumTrack {
+		currentTime += event.Delta
+		msg := event.Message
+
+		var ch, key, vel uint8
+		if msg.GetNoteOn(&ch, &key, &vel) && vel > 0 {
+			// Tom modifiers (110-112) - these define duration
+			if key >= 110 && key <= 112 {
+				padNote := uint8(98 + (key - 110)) // Map 110->98, 111->99, 112->100
+				tomModifiers = append(tomModifiers, TomModifier{
+					StartTime: currentTime,
+					EndTime:   currentTime, // Will be updated when we find the note off
+					Pad:       padNote,
+				})
+			}
+		} else if msg.GetNoteOff(&ch, &key, &vel) {
+			// Update end time for tom modifiers
+			if key >= 110 && key <= 112 {
+				padNote := uint8(98 + (key - 110))
+				// Find the most recent tom modifier for this pad and update its end time
+				for i := len(tomModifiers) - 1; i >= 0; i-- {
+					if tomModifiers[i].Pad == padNote && tomModifiers[i].EndTime == tomModifiers[i].StartTime {
+						tomModifiers[i].EndTime = currentTime
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Second pass: collect drum notes
+	currentTime = 0
+	for _, event := range drumTrack {
+		currentTime += event.Delta
+		msg := event.Message
+
+		var ch, key, vel uint8
+		if msg.GetNoteOn(&ch, &key, &vel) && vel > 0 {
+			// Expert drums are in the range 96-100 (C6-E6)
+			if key >= 96 && key <= 100 {
+				drumNotes = append(drumNotes, DrumNote{
+					Time:          currentTime,
+					Key:           key,
+					Velocity:      vel,
+					IsTomModified: isTomModified(currentTime, key),
+				})
+			}
+		}
+	}
+
+	// Sort by time to ensure proper ordering
+	sort.Slice(drumNotes, func(i, j int) bool {
+		return drumNotes[i].Time < drumNotes[j].Time
+	})
+
+	// Convert absolute times to delta times
+	for i := len(drumNotes) - 1; i > 0; i-- {
+		drumNotes[i].Time = drumNotes[i].Time - drumNotes[i-1].Time
+	}
+
+	return drumNotes
+}
+
+// generateDrumOutputFilename creates an appropriate output filename for the GM drum export
+func generateDrumOutputFilename(sourceFilename string) string {
+	base := strings.TrimSuffix(sourceFilename, filepath.Ext(sourceFilename))
+	if strings.Contains(base, "(from SNG)") {
+		base = strings.Replace(base, "notes.mid (from SNG)", "drums_gm", 1)
+	} else {
+		base = base + "_drums_gm"
+	}
+	return base + ".mid"
+}
+
+// extractTempoTrack copies only essential timing events from the original MIDI file's first track
+func extractTempoTrack(smfData *smf.SMF) smf.Track {
+	tempoTrack := smf.Track{}
+
+	if len(smfData.Tracks) == 0 {
+		// No tracks, create a basic tempo track
+		tempoMsg := smf.Message(smf.MetaTempo(120.0))
+		tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: tempoMsg})
+		timeSigMsg := smf.Message(smf.MetaTimeSig(4, 4, 24, 8))
+		tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: timeSigMsg})
+	} else {
+		// Copy only tempo, time signature, key signature, and track name events
+		firstTrack := smfData.Tracks[0]
+
+		for _, event := range firstTrack {
+			msg := event.Message
+			msgType := msg.Type()
+
+			// Copy only the specific meta events we want
+			if msgType == smf.MetaTempoMsg ||
+				msgType == smf.MetaTimeSigMsg ||
+				msgType == smf.MetaKeySigMsg ||
+				msgType == smf.MetaTrackNameMsg {
+				tempoTrack = append(tempoTrack, event)
+			}
+			// Ignore all other events
+		}
+	}
+
+	// Always end with End of Track
+	tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: smf.EOT})
+	return tempoTrack
+}

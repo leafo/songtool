@@ -13,22 +13,35 @@ import (
 
 func main() {
 	var jsonOutput bool
+	var exportDrums bool
 	var filename string
 
-	if len(os.Args) == 3 && os.Args[1] == "--json" {
-		jsonOutput = true
-		filename = os.Args[2]
-	} else if len(os.Args) == 2 {
-		jsonOutput = false
-		filename = os.Args[1]
-	} else {
-		fmt.Fprintf(os.Stderr, "Usage: %s [--json] <file>\n", os.Args[0])
+	// Parse command line arguments
+	args := os.Args[1:]
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--export-drums":
+			exportDrums = true
+		default:
+			if filename == "" {
+				filename = arg
+			} else {
+				fmt.Fprintf(os.Stderr, "Usage: %s [--json] [--export-drums] <file>\n", os.Args[0])
+				os.Exit(1)
+			}
+		}
+	}
+
+	if filename == "" {
+		fmt.Fprintf(os.Stderr, "Usage: %s [--json] [--export-drums] <file>\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == ".sng" {
-		handleSngFile(filename, jsonOutput)
+		handleSngFile(filename, jsonOutput, exportDrums)
 		return
 	}
 
@@ -45,7 +58,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	printMidiInfo(smfData, filename, jsonOutput)
+	if exportDrums {
+		ExportDrumsFromMidi(smfData, filename)
+	} else {
+		printMidiInfo(smfData, filename, jsonOutput)
+	}
 }
 
 func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
@@ -289,7 +306,7 @@ func parseRockBandLyrics(rawLyrics []string) string {
 	return strings.Join(result, " ")
 }
 
-func handleSngFile(filename string, jsonOutput bool) {
+func handleSngFile(filename string, jsonOutput bool, exportDrums bool) {
 	sng, err := OpenSngFile(filename)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening SNG file: %v\n", err)
@@ -346,5 +363,9 @@ func handleSngFile(filename string, jsonOutput bool) {
 		return
 	}
 
-	printMidiInfo(smfData, "notes.mid (from SNG)", jsonOutput)
+	if exportDrums {
+		ExportDrumsFromMidi(smfData, "notes.mid (from SNG)")
+	} else {
+		printMidiInfo(smfData, "notes.mid (from SNG)", jsonOutput)
+	}
 }
