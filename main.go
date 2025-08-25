@@ -16,6 +16,7 @@ import (
 func main() {
 	jsonOutput := flag.Bool("json", false, "Output MIDI information as JSON")
 	exportDrums := flag.Bool("export-drums", false, "Export drum patterns from MIDI file")
+	printTimeline := flag.Bool("timeline", false, "Print beat timeline from BEAT track")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -74,6 +75,17 @@ func main() {
 
 	if *exportDrums {
 		ExportDrumsFromMidi(midiFile, filename)
+	} else if *printTimeline {
+		printTimeline := func(midiFile *smf.SMF, filename string) {
+			timeline, err := ExtractBeatTimeline(midiFile)
+			if err != nil {
+				log.Printf("Error extracting timeline: %v\n", err)
+				return
+			}
+			fmt.Printf("Timeline for: %s\n", filename)
+			fmt.Print(timeline.String())
+		}
+		printTimeline(midiFile, filename)
 	} else {
 		if sngFile != nil {
 			printSngFile(sngFile, *jsonOutput)
