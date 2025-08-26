@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gitlab.com/gomidi/midi/v2"
@@ -42,7 +43,7 @@ type DrumNote struct {
 	IsTomModified bool // For Pro Drums: true if this note should be a tom instead of cymbal
 }
 
-// TomModifier represents a Pro Drums tom modifier event that converts a cymbol into a tom drum
+// Represents a range of time where cymbols are converted into toms
 // Only applies to the notes that match Pad color
 type TomModifier struct {
 	StartTime uint32
@@ -50,7 +51,7 @@ type TomModifier struct {
 	Pad       uint8 // 98 (yellow), 99 (blue), 100 (green)
 }
 
-// converts a DrumNote to general MIDI key
+// converts a DrumNote to general MIDI drum key
 func (dn *DrumNote) toMidiKey() (uint8, error) {
 	var gmKey uint8
 
@@ -112,11 +113,18 @@ func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
 	trackNameMsg := smf.Message(smf.MetaTrackSequenceName("Drums"))
 	drumsTrack = append(drumsTrack, smf.Event{Delta: 0, Message: trackNameMsg})
 
-	// Convert and add drum notes
+	// Collect all MIDI events with absolute timestamps
+	type midiEvent struct {
+		time    uint32
+		message smf.Message
+	}
+
+	var allEvents []midiEvent
+
+	// generate events for drum notes
 	for _, note := range expertDrumNotes {
 		// Convert to GM drums (handles both regular and Pro Drums)
 		gmNote, err := note.toMidiKey()
-
 		if err != nil {
 			log.Printf("Error converting drum note to General MIDI key: %v\n", err)
 			continue
@@ -124,11 +132,24 @@ func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
 
 		// Note On event
 		noteOnMsg := smf.Message(midi.NoteOn(gmDrumChannel, gmNote, note.Velocity))
-		drumsTrack = append(drumsTrack, smf.Event{Delta: note.Time, Message: noteOnMsg})
+		allEvents = append(allEvents, midiEvent{time: note.Time, message: noteOnMsg})
 
-		// Note Off event
+		// Note Off event at note time + duration
 		noteOffMsg := smf.Message(midi.NoteOff(gmDrumChannel, gmNote))
-		drumsTrack = append(drumsTrack, smf.Event{Delta: hitDurationTicks, Message: noteOffMsg})
+		allEvents = append(allEvents, midiEvent{time: note.Time + hitDurationTicks, message: noteOffMsg})
+	}
+
+	// Sort events by time
+	sort.Slice(allEvents, func(i, j int) bool {
+		return allEvents[i].time < allEvents[j].time
+	})
+
+	// Add events to track with proper delta times
+	var lastTime uint32
+	for _, event := range allEvents {
+		delta := event.time - lastTime
+		drumsTrack = append(drumsTrack, smf.Event{Delta: delta, Message: event.message})
+		lastTime = event.time
 	}
 
 	// Add end of track meta event to drums track
@@ -170,7 +191,7 @@ func extractDrumNotes(drumTrack smf.Track) []DrumNote {
 
 		var ch, key, vel uint8
 		if msg.GetNoteOn(&ch, &key, &vel) && vel > 0 {
-			// Tom modifiers (110-112) - these define duration
+			// Tom modifiers (110-112)
 			if key >= 110 && key <= 112 {
 				padNote := uint8(98 + (key - 110)) // Map 110->98, 111->99, 112->100
 				tomModifiers = append(tomModifiers, TomModifier{
@@ -214,11 +235,6 @@ func extractDrumNotes(drumTrack smf.Track) []DrumNote {
 		}
 	}
 
-	// Convert absolute times to delta times
-	for i := len(drumNotes) - 1; i > 0; i-- {
-		drumNotes[i].Time = drumNotes[i].Time - drumNotes[i-1].Time
-	}
-
 	return drumNotes
 }
 
@@ -238,6 +254,7 @@ func extractTempoTrack(smfData *smf.SMF) smf.Track {
 	tempoTrack := smf.Track{}
 
 	if len(smfData.Tracks) == 0 {
+		log.Println("Warning: Missing tempo track, creating default tempo 120bpm")
 		// No tracks, create a basic tempo track
 		tempoMsg := smf.Message(smf.MetaTempo(120.0))
 		tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: tempoMsg})
