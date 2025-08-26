@@ -5,7 +5,6 @@ import (
 	"io"
 	"log"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"gitlab.com/gomidi/midi/v2"
@@ -214,11 +213,6 @@ func extractDrumNotes(drumTrack smf.Track) []DrumNote {
 			}
 		}
 	}
-
-	// Sort by time to ensure proper ordering
-	sort.Slice(drumNotes, func(i, j int) bool {
-		return drumNotes[i].Time < drumNotes[j].Time
-	})
 
 	// Convert absolute times to delta times
 	for i := len(drumNotes) - 1; i > 0; i-- {
