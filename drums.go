@@ -100,7 +100,9 @@ func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
 	}
 
 	// Create new MIDI file with GM drums (Format 1 - multi-track)
+	// Use the same time format as the original file
 	newSMF := smf.NewSMF1()
+	newSMF.TimeFormat = smfData.TimeFormat // Preserve original timing resolution
 
 	// Track 0: Copy tempo/conductor information from original MIDI
 	tempoTrack := extractTempoTrack(smfData)
