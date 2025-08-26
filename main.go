@@ -19,8 +19,8 @@ func main() {
 	printTimeline := flag.Bool("timeline", false, "Print beat timeline from BEAT track")
 	flag.Parse()
 
-	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <file>\n", os.Args[0])
+	if flag.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <file> [output]\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -74,7 +74,25 @@ func main() {
 	}
 
 	if *exportDrums {
-		ExportDrumsFromMidi(midiFile, filename)
+		outputFile := flag.Arg(1)
+		if outputFile == "" {
+			outputFile = "gm_drums.mid"
+		}
+
+		file, err := os.Create(outputFile)
+		if err != nil {
+			log.Printf("Error creating output file: %v\n", err)
+			os.Exit(1)
+		}
+		defer file.Close()
+
+		err = ExportDrumsFromMidi(midiFile, file)
+		if err != nil {
+			log.Printf("Error exporting drums: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Drums exported to: %s\n", outputFile)
 	} else if *printTimeline {
 		printTimeline := func(midiFile *smf.SMF, filename string) {
 			timeline, err := ExtractBeatTimeline(midiFile)

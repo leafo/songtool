@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -73,8 +73,8 @@ func (dn *DrumNote) toMidiKey() (uint8, error) {
 }
 
 // ExportDrumsFromMidi extracts expert difficulty drums from a Rock Band MIDI file
-// and converts them to GM standard drums, outputting a new MIDI file
-func ExportDrumsFromMidi(smfData *smf.SMF, sourceFilename string) {
+// and converts them to GM standard drums, outputting to the provided writer
+func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
 	// Find the PART DRUMS track
 	var drumTrack smf.Track
 	var drumTrackFound bool
@@ -89,16 +89,14 @@ func ExportDrumsFromMidi(smfData *smf.SMF, sourceFilename string) {
 	}
 
 	if !drumTrackFound {
-		fmt.Fprintf(os.Stderr, "Error: No 'PART DRUMS' track found\n")
-		os.Exit(1)
+		return fmt.Errorf("no 'PART DRUMS' track found")
 	}
 
 	// Extract Expert difficulty drum notes (MIDI range 96-100)
 	expertDrumNotes := extractDrumNotes(drumTrack)
 
 	if len(expertDrumNotes) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: No expert drum notes found\n")
-		os.Exit(1)
+		return fmt.Errorf("no expert drum notes found")
 	}
 
 	// Create new MIDI file with GM drums (Format 1 - multi-track)
@@ -138,25 +136,13 @@ func ExportDrumsFromMidi(smfData *smf.SMF, sourceFilename string) {
 	drumsTrack = append(drumsTrack, smf.Event{Delta: 0, Message: smf.EOT})
 	newSMF.Add(drumsTrack)
 
-	// Generate output filename
-	outputFile := generateDrumOutputFilename(sourceFilename)
-
-	// Write the new MIDI file
-	file, err := os.Create(outputFile)
+	// Write the new MIDI file to the provided writer
+	_, err := newSMF.WriteTo(writer)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
-		os.Exit(1)
-	}
-	defer file.Close()
-
-	_, err = newSMF.WriteTo(file)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing MIDI file: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error writing MIDI file: %w", err)
 	}
 
-	fmt.Printf("Drums exported to: %s\n", outputFile)
-	fmt.Printf("Converted %d drum notes from expert difficulty\n", len(expertDrumNotes))
+	return nil
 }
 
 // extractDrumNotes finds all expert difficulty drum notes (96-100) in the drum track
