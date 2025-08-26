@@ -124,7 +124,7 @@ func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
 	var allEvents []midiEvent
 
 	// generate events for drum notes
-	for _, note := range expertDrumNotes {
+	for i, note := range expertDrumNotes {
 		// Convert to GM drums (handles both regular and Pro Drums)
 		gmNote, err := note.toMidiKey()
 		if err != nil {
@@ -132,17 +132,53 @@ func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
 			continue
 		}
 
-		// Note On event
+		// append Note On event
 		noteOnMsg := smf.Message(midi.NoteOn(gmDrumChannel, gmNote, note.Velocity))
 		allEvents = append(allEvents, midiEvent{time: note.Time, message: noteOnMsg})
 
-		// Note Off event at note time + duration
+		endTime := note.Time + hitDurationTicks
+
+		// Look ahead to see if this note duration overlaps with a repeat note, and
+		// truncate the end time to the start time of that note
+		for j := i + 1; j < len(expertDrumNotes); j++ {
+			nextNote := expertDrumNotes[j]
+
+			// Stop looking if the next note is beyond our end time
+			if nextNote.Time >= endTime {
+				break
+			}
+
+			// Check if this is the same GM drum sound
+			nextGmNote, err := nextNote.toMidiKey()
+			if err != nil {
+				continue
+			}
+
+			if nextGmNote == gmNote {
+				// Truncate end time to when the next note starts
+				endTime = nextNote.Time
+				break
+			}
+		}
+
+		// append Note Off event
 		noteOffMsg := smf.Message(midi.NoteOff(gmDrumChannel, gmNote))
-		allEvents = append(allEvents, midiEvent{time: note.Time + hitDurationTicks, message: noteOffMsg})
+		allEvents = append(allEvents, midiEvent{time: endTime, message: noteOffMsg})
 	}
 
 	// Sort events by time
 	sort.Slice(allEvents, func(i, j int) bool {
+		if allEvents[i].time == allEvents[j].time {
+			// If times are equal, prioritize note-offs (and vel=0 note-ons) before regular note-ons
+			var ch1, note1, vel1 uint8
+			var ch2, note2, vel2 uint8
+			isNoteOff1 := allEvents[i].message.GetNoteOff(&ch1, &note1, &vel1)
+			isNoteOn2 := allEvents[j].message.GetNoteOn(&ch2, &note2, &vel2)
+
+			if (isNoteOff1 || (isNoteOn2 && vel2 == 0)) && ch1 == ch2 && note1 == note2 {
+				return true
+			}
+		}
 		return allEvents[i].time < allEvents[j].time
 	})
 
