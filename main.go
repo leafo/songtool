@@ -17,6 +17,8 @@ func main() {
 	jsonOutput := flag.Bool("json", false, "Output MIDI information as JSON")
 	exportDrums := flag.Bool("export-drums", false, "Export drum patterns from MIDI file")
 	printTimeline := flag.Bool("timeline", false, "Print beat timeline from BEAT track")
+	exportToneLib := flag.Bool("export-tonelib-xml", false, "Export to ToneLib the_song.dat XML format")
+	createToneLibSong := flag.Bool("export-tonelib-song", false, "Create complete ToneLib .song file (ZIP archive)")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -104,6 +106,14 @@ func main() {
 			fmt.Print(timeline.String())
 		}
 		printTimeline(midiFile, filename)
+	} else if *exportToneLib {
+		exportToToneLib(midiFile, sngFile, filename)
+	} else if *createToneLibSong {
+		outputFile := flag.Arg(1)
+		if outputFile == "" {
+			outputFile = "output.song"
+		}
+		createToneLibSongFile(midiFile, sngFile, outputFile)
 	} else {
 		if sngFile != nil {
 			printSngFile(sngFile, *jsonOutput)
@@ -275,4 +285,26 @@ func printSngFile(sngFile *SngFile, jsonOutput bool) {
 		fmt.Printf("  %s (%d bytes)\n", filename, entry.Size)
 	}
 	fmt.Println()
+}
+
+// exportToToneLib exports MIDI/SNG data to ToneLib the_song.dat XML format
+func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
+	err := ConvertToToneLib(midiFile, sngFile, "")
+	if err != nil {
+		log.Printf("Error exporting to ToneLib: %v\n", err)
+		return
+	}
+}
+
+// createToneLibSongFile creates a complete ToneLib .song ZIP archive
+func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile string) {
+	fmt.Printf("Creating ToneLib song file: %s\n", outputFile)
+
+	err := CreateToneLibSongFile(midiFile, sngFile, outputFile)
+	if err != nil {
+		log.Printf("Error creating ToneLib song file: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Successfully created ToneLib song file: %s\n", outputFile)
 }
