@@ -376,19 +376,14 @@ func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF) ToneLibTra
 	barNotes := make(map[int][]DrumNote)
 	maxBar := 1
 
-	// Convert delta times back to absolute times for bar calculation
-	absoluteTime := uint32(0)
+	// DrumNote.Time is already absolute time in ticks
 	for _, note := range drumNotes {
-		absoluteTime += note.Time
-		barNum := int(absoluteTime/uint32(ticksPerBar)) + 1
+		barNum := int(note.Time/uint32(ticksPerBar)) + 1
 		if barNum > maxBar {
 			maxBar = barNum
 		}
 
-		// Create a copy with absolute time for processing
-		noteWithAbsTime := note
-		noteWithAbsTime.Time = absoluteTime
-		barNotes[barNum] = append(barNotes[barNum], noteWithAbsTime)
+		barNotes[barNum] = append(barNotes[barNum], note)
 	}
 
 	// Create ToneLib bars

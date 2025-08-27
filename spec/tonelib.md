@@ -600,7 +600,7 @@ Common drum sounds found in the example file:
   1. Optional `<Clef value="1"/>` (treble clef, usually only in first bar)
   2. Optional `<KeySign value="0"/>` (key signature, usually only in first bar)
   3. One or more `<Beat>` elements
-  4. Required closing `<Beats/>` tag
+  4. Required trailing empty `<Beats/>` tag
 - The sum of all `duration` values in `<Beat>` elements should equal the time signature
 - For 4/4 time, beat durations should sum to represent 4 quarter note values
 
