@@ -167,64 +167,7 @@ type ToneLibAudio struct {
 
 // ConvertToToneLib converts a MIDI file to ToneLib the_song.dat XML format
 func ConvertToToneLib(midiFile *smf.SMF, sngFile *SngFile, outputPath string) error {
-	score := &ToneLibScore{
-		Info: ToneLibInfo{
-			ShowRemarks: "no",
-		},
-	}
-
-	// Fill in metadata from SNG file if available, otherwise from MIDI
-	if sngFile != nil {
-		metadata := sngFile.GetMetadata()
-		score.Info.Name = metadata["name"]
-		score.Info.Artist = metadata["artist"]
-		score.Info.Album = metadata["album"]
-		score.Info.Author = metadata["author"]
-		score.Info.Writer = metadata["writer"]
-	} else {
-		// Use track 0 name as song title if no SNG metadata
-		if len(midiFile.Tracks) > 0 {
-			trackName := getTrackName(midiFile.Tracks[0])
-			if trackName != "" {
-				score.Info.Name = trackName
-			}
-		}
-	}
-
-	// Extract timeline for tempo mapping
-	timeline, err := ExtractBeatTimeline(midiFile)
-	if err != nil {
-		// If no BEAT track, create a simple bar structure with default tempo
-		score.BarIndex = createDefaultBarIndex(midiFile)
-	} else {
-		score.BarIndex = createBarIndexFromTimeline(timeline)
-	}
-
-	// Create tracks from MIDI
-	score.Tracks = createTracksFromMidi(midiFile)
-
-	// Add backing track reference if SNG file has audio
-	if sngFile != nil {
-		// Check for song.opus file in SNG
-		files := sngFile.ListFiles()
-		for _, filename := range files {
-			if filename == "song.opus" {
-				// Create a hash for the audio file name (simplified approach)
-				hash := sha256.Sum256([]byte(filename))
-				audioHash := hex.EncodeToString(hash[:])[:16] // Use first 16 chars
-
-				score.BackingTrack = &ToneLibBackingTrack{
-					Audio: ToneLibAudio{
-						Name:       fmt.Sprintf("audio/%s.snd", audioHash),
-						TimeOffset: "0.0",
-					},
-				}
-				break
-			}
-		}
-	}
-
-	// Print XML to stdout
+	score := createToneLibScore(midiFile, sngFile)
 	return writeScoreXML(score, os.Stdout)
 }
 
@@ -688,7 +631,6 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 	return nil
 }
 
-// createToneLibScore creates the ToneLib score structure (factored out from ConvertToToneLib)
 func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
 	score := &ToneLibScore{
 		Info: ToneLibInfo{
