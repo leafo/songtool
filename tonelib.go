@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -224,7 +225,7 @@ func ConvertToToneLib(midiFile *smf.SMF, sngFile *SngFile, outputPath string) er
 	}
 
 	// Print XML to stdout
-	return printXML(score)
+	return writeScoreXML(score, os.Stdout)
 }
 
 // createDefaultBarIndex creates a simple bar structure with default 120 BPM tempo
@@ -605,19 +606,19 @@ func estimateBarCount(midiFile *smf.SMF) int {
 }
 
 // printXML outputs the ToneLib score as XML to stdout
-func printXML(score *ToneLibScore) error {
-	// Write XML declaration
-	fmt.Print(`<?xml version="1.0" encoding="UTF-8"?>` + "\r\n")
-
-	// Marshal and print the XML
-	encoder := xml.NewEncoder(os.Stdout)
+func writeScoreXML(score *ToneLibScore, writer io.Writer) error {
+	writer.Write([]byte(xml.Header))
+	encoder := xml.NewEncoder(writer)
 	encoder.Indent("", "  ")
 
 	if err := encoder.Encode(score); err != nil {
 		return fmt.Errorf("failed to encode XML: %w", err)
 	}
 
-	fmt.Println() // Add final newline
+	_, err := writer.Write([]byte("\n")) // Add final newline
+	if err != nil {
+		return fmt.Errorf("failed to write final newline: %w", err)
+	}
 	return nil
 }
 
@@ -650,15 +651,8 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 		return fmt.Errorf("failed to create the_song.dat: %w", err)
 	}
 
-	// Write XML with CRLF line endings as per spec
-	if _, err := songWriter.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` + "\r\n")); err != nil {
-		return fmt.Errorf("failed to write XML declaration: %w", err)
-	}
-
-	encoder := xml.NewEncoder(songWriter)
-	encoder.Indent("", "  ")
-	if err := encoder.Encode(score); err != nil {
-		return fmt.Errorf("failed to encode XML: %w", err)
+	if err := writeScoreXML(score, songWriter); err != nil {
+		return fmt.Errorf("failed to write the_song.dat: %w", err)
 	}
 
 	// 3. Create audio directory and copy song.opus if available
@@ -689,24 +683,6 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 				break
 			}
 		}
-	}
-
-	// 4. Create minimal plg_set_list.dat
-	pluginWriter, err := zipWriter.Create("plg_set_list.dat")
-	if err != nil {
-		return fmt.Errorf("failed to create plg_set_list.dat: %w", err)
-	}
-
-	pluginXML := `<?xml version="1.0" encoding="UTF-8"?>` + "\r\n" +
-		`<plg_set_list>` + "\r\n" +
-		`  <plg_set>` + "\r\n" +
-		`    <nodes>` + "\r\n" +
-		`    </nodes>` + "\r\n" +
-		`  </plg_set>` + "\r\n" +
-		`</plg_set_list>` + "\r\n"
-
-	if _, err := pluginWriter.Write([]byte(pluginXML)); err != nil {
-		return fmt.Errorf("failed to write plugin XML: %w", err)
 	}
 
 	return nil
