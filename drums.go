@@ -238,8 +238,8 @@ func extractDrumNotes(drumTrack smf.Track) []DrumNote {
 					Pad:       padNote,
 				})
 			}
-		} else if msg.GetNoteOff(&ch, &key, &vel) {
-			// Update end time for tom modifiers
+		} else if msg.GetNoteOff(&ch, &key, &vel) || (msg.GetNoteOn(&ch, &key, &vel) && vel == 0) {
+			// Update end time for tom modifiers (handles both explicit NoteOff and NoteOn with velocity 0)
 			if key >= 110 && key <= 112 {
 				padNote := uint8(98 + (key - 110))
 				// Find the most recent tom modifier for this pad and update its end time
