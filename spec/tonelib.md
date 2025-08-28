@@ -420,7 +420,7 @@ The `<Tracks>` section within `the_song.dat` contains all musical track data. Ea
 - **`bank`**: MIDI bank select (128 for percussion, 0 for melodic)
 - **`program`**: MIDI program change (instrument selection)
 - **`id`**: Unique track identifier
-- **`offset`**: Time synchronization offset in ticks
+- **`offset`**: This value must always be set to `"24"` to ensure correct pitch playback of track notes
 
 #### Strings Section:
 The ToneLib format is designed primarily for stringed instruments and requires all tracks to define strings with MIDI tuning values. Each string represents a distinct voice or pitch reference for notes played on that string.
@@ -603,6 +603,7 @@ Common drum sounds found in the example file:
   4. Required trailing empty `<Beats/>` tag
 - The sum of all `duration` values in `<Beat>` elements should equal the time signature
 - For 4/4 time, beat durations should sum to represent 4 quarter note values
+- **CRITICAL**: The number of `<Bar>` elements in each track's `<Bars>` section must exactly match the number of `<Bar>` elements defined in the `<BarIndex>` section. Every bar defined in `<BarIndex>` must have corresponding `<Bar>` elements in all tracks
 
 ## Complete Example File
 

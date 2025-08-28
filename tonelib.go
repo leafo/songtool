@@ -99,16 +99,16 @@ type ToneLibString struct {
 
 // Track bars container
 type ToneLibTrackBars struct {
-	Bars  []ToneLibTrackBar `xml:"Bar"`
-	Beats *string           `xml:"Beats"` // Empty closing tag
+	Bars []ToneLibTrackBar `xml:"Bar"`
 }
 
 // Individual bar in a track
 type ToneLibTrackBar struct {
-	ID      int             `xml:"id,attr"`
-	Clef    *ToneLibClef    `xml:"Clef,omitempty"`
-	KeySign *ToneLibKeySign `xml:"KeySign,omitempty"`
-	Beats   []ToneLibBeat   `xml:"Beat"`
+	ID       int             `xml:"id,attr"`
+	Clef     *ToneLibClef    `xml:"Clef,omitempty"`
+	KeySign  *ToneLibKeySign `xml:"KeySign,omitempty"`
+	Beats    []ToneLibBeat   `xml:"Beat"`
+	BeatsEnd *string         `xml:"Beats"` // Required empty closing tag
 }
 
 type ToneLibClef struct {
@@ -243,7 +243,7 @@ func createBarIndexFromTimeline(timeline *Timeline) ToneLibBarIndex {
 
 // createTracksFromMidi analyzes MIDI tracks and creates ToneLib tracks
 // For now, only creates drum tracks from Rock Band "PART DRUMS" track
-func createTracksFromMidi(midiFile *smf.SMF) ToneLibTracks {
+func createTracksFromMidi(midiFile *smf.SMF, numBars int) ToneLibTracks {
 	var tracks []ToneLibTrack
 
 	// Find the "PART DRUMS" track specifically
@@ -282,9 +282,9 @@ func createTracksFromMidi(midiFile *smf.SMF) ToneLibTracks {
 				Phaser:   0,
 				Tremolo:  0,
 				ID:       1,
-				Offset:   0,
+				Offset:   24, // Required for correct pitch playback
 				Strings:  createDrumStrings(),
-				Bars:     createDrumBarsFromNotes(expertDrumNotes, midiFile),
+				Bars:     createDrumBarsFromNotes(expertDrumNotes, midiFile, numBars),
 			}
 
 			tracks = append(tracks, toneLibTrack)
@@ -347,19 +347,29 @@ func createDrumStrings() ToneLibStrings {
 }
 
 // createDrumBarsFromNotes converts Rock Band drum notes to ToneLib bars
-func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF) ToneLibTrackBars {
+func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF, numBars int) ToneLibTrackBars {
 	if len(drumNotes) == 0 {
-		// Create empty bar if no drum notes
+		// Create empty bars matching BarIndex count
 		emptyBeats := ""
-		return ToneLibTrackBars{
-			Bars: []ToneLibTrackBar{{
-				ID:      1,
-				Clef:    &ToneLibClef{Value: 5}, // Percussion clef
-				KeySign: &ToneLibKeySign{Value: 0},
-				Beats:   []ToneLibBeat{{Duration: 1, Dyn: "mf"}}, // Whole rest
-			}},
-			Beats: &emptyBeats,
+		bars := make([]ToneLibTrackBar, numBars)
+
+		for i := 0; i < numBars; i++ {
+			bar := ToneLibTrackBar{
+				ID:       i + 1,
+				Beats:    []ToneLibBeat{{Duration: 1, Dyn: "mf"}}, // Whole rest
+				BeatsEnd: &emptyBeats,
+			}
+
+			// Add clef and key signature to first bar
+			if i == 0 {
+				bar.Clef = &ToneLibClef{Value: 5} // Percussion clef
+				bar.KeySign = &ToneLibKeySign{Value: 0}
+			}
+
+			bars[i] = bar
 		}
+
+		return ToneLibTrackBars{Bars: bars}
 	}
 
 	// Get ticks per quarter note for timing calculations
@@ -374,25 +384,25 @@ func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF) ToneLibTra
 
 	// Group notes by bar
 	barNotes := make(map[int][]DrumNote)
-	maxBar := 1
 
 	// DrumNote.Time is already absolute time in ticks
 	for _, note := range drumNotes {
 		barNum := int(note.Time/uint32(ticksPerBar)) + 1
-		if barNum > maxBar {
-			maxBar = barNum
+		// Only include notes within the expected bar count
+		if barNum <= numBars {
+			barNotes[barNum] = append(barNotes[barNum], note)
 		}
-
-		barNotes[barNum] = append(barNotes[barNum], note)
 	}
 
-	// Create ToneLib bars
+	// Create ToneLib bars - exactly numBars to match BarIndex
 	var bars []ToneLibTrackBar
+	emptyBeats := ""
 
-	for barID := 1; barID <= maxBar; barID++ {
+	for barID := 1; barID <= numBars; barID++ {
 		bar := ToneLibTrackBar{
-			ID:    barID,
-			Beats: []ToneLibBeat{},
+			ID:       barID,
+			Beats:    []ToneLibBeat{},
+			BeatsEnd: &emptyBeats, // Required empty closing tag for each bar
 		}
 
 		// Add clef and key signature to first bar
@@ -413,10 +423,8 @@ func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF) ToneLibTra
 		bars = append(bars, bar)
 	}
 
-	emptyBeats := ""
 	return ToneLibTrackBars{
-		Bars:  bars,
-		Beats: &emptyBeats,
+		Bars: bars,
 	}
 }
 
@@ -660,8 +668,9 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
 		score.BarIndex = createBarIndexFromTimeline(timeline)
 	}
 
-	// Create tracks from MIDI
-	score.Tracks = createTracksFromMidi(midiFile)
+	// Create tracks from MIDI - ensure bar count matches BarIndex
+	numBars := len(score.BarIndex.Bars)
+	score.Tracks = createTracksFromMidi(midiFile, numBars)
 
 	// Add backing track reference if SNG file has audio
 	if sngFile != nil {
