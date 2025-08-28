@@ -275,7 +275,7 @@ This section within the `<Score>` element links an external audio file to the pr
     <data_file>audio/5195ec35afd874d.snd</data_file>
     <data_len>2560178</data_len>
     <time_offset>0</time_offset>
-    <gain>0</gain>
+    <gain>1</gain>
     <channel_mode>0</channel_mode>
   </audio>
 </Backing_track1>
@@ -296,7 +296,7 @@ This section within the `<Score>` element links an external audio file to the pr
 - `<data_file>`: Path to the actual audio file within the ZIP archive (e.g., `audio/hash.snd`)
 - `<data_len>`: Size of the converted audio file in bytes
 - `<time_offset>`: Time shift in seconds for audio alignment (0 = no offset)
-- `<gain>`: Audio gain adjustment (0 = no gain adjustment)
+- `<gain>`: Audio gain adjustment (1 = normal gain, 0 = silent)
 - `<channel_mode>`: Audio channel configuration (0 = stereo)
 
 **Audio Conversion Process:**
@@ -765,7 +765,7 @@ Here is a complete, minimal example of a `the_song.dat` XML file containing two 
       <data_file>audio/a1b2c3d4e5f6.snd</data_file>
       <data_len>2560178</data_len>
       <time_offset>0</time_offset>
-      <gain>0</gain>
+      <gain>1</gain>
       <channel_mode>0</channel_mode>
     </audio>
   </Backing_track1>

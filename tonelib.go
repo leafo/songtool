@@ -772,7 +772,7 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
 						DataFile:    "",       // Will be updated with actual path from conversion
 						DataLen:     0,        // Will be updated with actual converted size
 						TimeOffset:  "0",
-						Gain:        "0",
+						Gain:        "1",
 						ChannelMode: 0,
 					},
 				}
