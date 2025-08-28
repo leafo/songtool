@@ -162,7 +162,8 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 			continue
 		}
 
-		var noteCount, ccCount, pgmCount int
+		// Event type counters
+		eventCounts := make(map[string]int)
 		var firstTime, lastTime uint32
 		var channels = make(map[uint8]bool)
 		var instruments = make(map[uint8]string)
@@ -177,20 +178,28 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 
 			msg := event.Message
 
-			var ch, key, vel uint8
+			// Get the message type and use it as the event name
+			msgType := msg.Type()
+			eventTypeName := msgType.String()
+			eventCounts[eventTypeName]++
 
+			// Still need to extract channel and instrument info for other parts of the output
+			var ch, key, vel uint8
 			if msg.GetNoteOn(&ch, &key, &vel) {
-				noteCount++
 				channels[ch] = true
 			} else if msg.GetNoteOff(&ch, &key, &vel) {
 				channels[ch] = true
 			} else if msg.GetControlChange(&ch, &key, &vel) {
-				ccCount++
 				channels[ch] = true
 			} else if msg.GetProgramChange(&ch, &vel) {
-				pgmCount++
 				channels[ch] = true
 				instruments[ch] = getGMInstrument(vel)
+			} else if msg.GetPitchBend(&ch, nil, nil) {
+				channels[ch] = true
+			} else if msg.GetPolyAfterTouch(&ch, &key, &vel) {
+				channels[ch] = true
+			} else if msg.GetAfterTouch(&ch, &vel) {
+				channels[ch] = true
 			}
 		}
 
@@ -201,9 +210,14 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 		}
 
 		fmt.Printf("  Duration: %d ticks (%.2f seconds @ 120 BPM)\n", duration, durationMs/1000)
-		fmt.Printf("  Note events: %d\n", noteCount)
-		fmt.Printf("  Control change events: %d\n", ccCount)
-		fmt.Printf("  Program change events: %d\n", pgmCount)
+
+		// Print event counts by type
+		if len(eventCounts) > 0 {
+			fmt.Println("  Event counts by type:")
+			for eventType, count := range eventCounts {
+				fmt.Printf("    %s: %d\n", eventType, count)
+			}
+		}
 		cleanLyrics := extractLyrics(track)
 		if cleanLyrics != "" {
 			fmt.Printf("  Lyrics: %s\n", cleanLyrics)
