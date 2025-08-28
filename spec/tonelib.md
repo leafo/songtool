@@ -64,7 +64,7 @@ The `<info>` block contains metadata about the song. While many of these fields 
   <remarks/>      <!-- Any additional notes -->
   <show_remarks>no</show_remarks>
 </info>
-  
+
 #### Tempo and Time Signature: `<BarIndex>`
 
 The `<BarIndex>` defines the overall structure of the song in terms of bars (measures), tempo, and time signature. This is the **primary element for synchronizing the transcription with an audio file**.
@@ -97,7 +97,7 @@ The `<BarIndex>` defines the overall structure of the song in terms of bars (mea
   - `<label>`: This optional child element is used to add a text marker for a specific bar, often to denote a section of the song like "Intro" or "Verse"
     - `letter`: A short-form letter for the section (e.g., "A", "B"). Can be left empty
     - `text`: The descriptive name of the section (e.g., "Intro")
-  
+
 #### Tracks and Notes: `<Tracks>`
 
 The `<Tracks>` element contains one or more `<Track>` elements, each representing a different instrument or part.
@@ -106,7 +106,7 @@ The `<Tracks>` element contains one or more `<Track>` elements, each representin
 <Tracks>
   <Track name="TrackName" color="ARGB" visible="1" collapse="0" lock="0"
          solo="0" mute="0" opt="0" vol_db="VOLUME" bank="BANK_NUM"
-         program="PROGRAM_NUM" chorus="0" reverb="0" phaser="0" 
+         program="PROGRAM_NUM" chorus="0" reverb="0" phaser="0"
          tremolo="0" id="TRACK_ID" offset="OFFSET">
     <Strings>
       <String id="N" tuning="MIDI_OFFSET"/>
@@ -264,22 +264,48 @@ The `<Bars>` element within a `<Track>` contains the musical information for tha
 
 #### Audio File Linking: `<Backing_track1>`
 
-This section within the `<Score>` element links an external audio file to the project. **Note:** In the complete ToneLib `.song` format, audio files are stored separately as `.snd` files within the ZIP archive's `audio/` directory. The actual synchronization of the notes to this audio is controlled by the tempo map in the `<BarIndex>` element.
+This section within the `<Score>` element links an external audio file to the project and controls its playback properties. **Note:** In the complete ToneLib `.song` format, audio files are stored separately as `.snd` files within the ZIP archive's `audio/` directory. The actual synchronization of the notes to this audio is controlled by the tempo map in the `<BarIndex>` element.
 
-- `<audio>`: Contains information about the audio file
-  - `<name>`: The filename of the audio file (e.g., `song.ogg`). In the full ToneLib format, this references an audio file stored separately in the ZIP archive
-  - `<time_offset>`: A value in seconds to shift the start of the audio. A negative value means the audio starts slightly before the first beat of the first bar. This is useful for aligning audio that has a pickup or lead-in
-  - `<bars>`: **(Optional)** This element and its child `<beat>` elements are not used for playback synchronization. They are only used to store and display visual markers in the timeline if an automatic beat-detection process has been run on the audio file. For creating a file from scratch, this entire `<bars>` section can be omitted
-
-**Example:**
+**Complete Backing Track Structure:**
 ```xml
-<Backing_track1>
+<Backing_track1 color="ff40a0a0" visible="1" collapse="0" lock="0" solo="0" mute="0"
+                opt="0" vol_db="0">
   <audio>
-    <name>audio/mysong.ogg</name>
-    <time_offset>0.0</time_offset>
+    <name>song.opus</name>
+    <data_file>audio/5195ec35afd874d.snd</data_file>
+    <data_len>2560178</data_len>
+    <time_offset>0</time_offset>
+    <gain>0</gain>
+    <channel_mode>0</channel_mode>
   </audio>
 </Backing_track1>
 ```
+
+**Backing Track Attributes:**
+- `color`: ARGB color value for UI display (e.g., "ff40a0a0" for teal)
+- `visible`: Track visibility (1=visible, 0=hidden)
+- `collapse`: UI collapse state (1=collapsed, 0=expanded)
+- `lock`: Edit protection (1=locked, 0=unlocked)
+- `solo`: Solo playback (1=solo, 0=normal)
+- `mute`: Mute state (1=muted, 0=unmuted)
+- `opt`: Optional parameter (typically 0)
+- `vol_db`: Volume in decibels (e.g., "0", "-2.099999904632568")
+
+**Audio Sub-element:**
+- `<name>`: Display name of the original audio file (e.g., `song.opus`)
+- `<data_file>`: Path to the actual audio file within the ZIP archive (e.g., `audio/hash.snd`)
+- `<data_len>`: Size of the converted audio file in bytes
+- `<time_offset>`: Time shift in seconds for audio alignment (0 = no offset)
+- `<gain>`: Audio gain adjustment (0 = no gain adjustment)
+- `<channel_mode>`: Audio channel configuration (0 = stereo)
+
+**Audio Conversion Process:**
+When creating ToneLib files from other formats, audio files undergo automatic conversion:
+1. Source audio (e.g., Opus format) is converted to Ogg Vorbis using ffmpeg
+2. Conversion parameters: stereo, 44100 Hz, ~128kbps, libvorbis codec
+3. Converted file is stored in `audio/` directory with SHA-256 hash filename
+4. Original filename is preserved in `<name>` for display purposes
+5. Converted file size is recorded in `<data_len>` for proper loading
 
 ### Special Section: Encoding Vocal Melodies
 
@@ -379,7 +405,7 @@ The `<Tracks>` section within `the_song.dat` contains all musical track data. Ea
 <Tracks>
   <Track name="TRACK_NAME" color="ARGB_HEX" visible="1" collapse="0" lock="0"
          solo="0" mute="0" opt="0" vol_db="VOLUME_DB" bank="MIDI_BANK"
-         program="MIDI_PROGRAM" chorus="0" reverb="0" phaser="0" 
+         program="MIDI_PROGRAM" chorus="0" reverb="0" phaser="0"
          tremolo="0" id="UNIQUE_ID" offset="TIME_OFFSET">
     <Strings>
       <String id="1" tuning="MIDI_OFFSET"/>
@@ -519,7 +545,7 @@ All tracks in ToneLib must be represented as fretted instruments with six string
 
 **Track Configuration:**
 ```xml
-<Track name="Drum" color="fffad11c" bank="128" program="0" 
+<Track name="Drum" color="fffad11c" bank="128" program="0"
        visible="1" collapse="0" lock="0" id="4" offset="0">
   <Strings>
     <String id="1" tuning="0"/>
@@ -732,10 +758,15 @@ Here is a complete, minimal example of a `the_song.dat` XML file containing two 
     </Track>
   </Tracks>
 
-  <Backing_track1>
+  <Backing_track1 color="ff40a0a0" visible="1" collapse="0" lock="0" solo="0" mute="0"
+                  opt="0" vol_db="0">
     <audio>
-      <name>audio/mysong.ogg</name>
-      <time_offset>0.0</time_offset>
+      <name>mysong.opus</name>
+      <data_file>audio/a1b2c3d4e5f6.snd</data_file>
+      <data_len>2560178</data_len>
+      <time_offset>0</time_offset>
+      <gain>0</gain>
+      <channel_mode>0</channel_mode>
     </audio>
   </Backing_track1>
 </Score>
