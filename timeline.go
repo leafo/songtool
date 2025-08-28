@@ -23,8 +23,8 @@ type Measure struct {
 
 // Timeline represents the complete beat timeline of a song
 type Timeline struct {
-	Measures    []Measure
-	BeatNotes   []BeatNote
+	Measures     []Measure
+	BeatNotes    []BeatNote
 	TicksPerBeat float64 // Derived from time signature and tempo
 }
 
@@ -33,7 +33,7 @@ func ExtractBeatTimeline(smfData *smf.SMF) (*Timeline, error) {
 	// Find the BEAT track
 	var beatTrack smf.Track
 	var found bool
-	
+
 	for _, track := range smfData.Tracks {
 		trackName := getTrackName(track)
 		if trackName == "BEAT" {
@@ -42,42 +42,42 @@ func ExtractBeatTimeline(smfData *smf.SMF) (*Timeline, error) {
 			break
 		}
 	}
-	
+
 	if !found {
 		return nil, fmt.Errorf("BEAT track not found")
 	}
-	
+
 	// Extract beat notes from the BEAT track
 	beatNotes, err := extractBeatNotes(beatTrack)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract beat notes: %w", err)
 	}
-	
+
 	if len(beatNotes) == 0 {
 		return nil, fmt.Errorf("no beat notes found in BEAT track")
 	}
-	
+
 	// Extract tempo information from all tracks
 	tempoMap, err := extractTempoMap(smfData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract tempo map: %w", err)
 	}
-	
+
 	// Get ticks per quarter note for BPM calculations
 	ticksPerQuarter, ok := smfData.TimeFormat.(smf.MetricTicks)
 	if !ok {
 		return nil, fmt.Errorf("unsupported time format, expected MetricTicks")
 	}
-	
+
 	// Create measures from beat pattern
 	measures := createMeasuresFromBeats(beatNotes, tempoMap, float64(ticksPerQuarter))
-	
+
 	timeline := &Timeline{
 		Measures:     measures,
 		BeatNotes:    beatNotes,
 		TicksPerBeat: float64(ticksPerQuarter),
 	}
-	
+
 	return timeline, nil
 }
 
@@ -85,15 +85,20 @@ func ExtractBeatTimeline(smfData *smf.SMF) (*Timeline, error) {
 func extractBeatNotes(beatTrack smf.Track) ([]BeatNote, error) {
 	var beatNotes []BeatNote
 	var currentTime uint32
-	
+
 	for _, event := range beatTrack {
 		currentTime += event.Delta
-		
+
 		msg := event.Message
 		var ch, key, vel uint8
-		
+
 		// Check for note on events
 		if msg.GetNoteOn(&ch, &key, &vel) {
+			// noteoff events encoded as note on with velocity 0
+			if vel == 0 {
+				continue
+			}
+
 			var isDownbeat bool
 			switch key {
 			case 12: // C-1 - Downbeat
@@ -102,21 +107,22 @@ func extractBeatNotes(beatTrack smf.Track) ([]BeatNote, error) {
 				isDownbeat = false
 			default:
 				// Skip notes that aren't beat markers
+				fmt.Printf("Invalid note detected at time %d with key %d\n", currentTime, key)
 				continue
 			}
-			
+
 			beatNotes = append(beatNotes, BeatNote{
 				Time:       currentTime,
 				IsDownbeat: isDownbeat,
 			})
 		}
 	}
-	
+
 	// Sort by time to ensure proper order
 	sort.Slice(beatNotes, func(i, j int) bool {
 		return beatNotes[i].Time < beatNotes[j].Time
 	})
-	
+
 	return beatNotes, nil
 }
 
@@ -129,26 +135,26 @@ type TempoEvent struct {
 // extractTempoMap extracts tempo changes from all tracks in the MIDI file
 func extractTempoMap(smfData *smf.SMF) ([]TempoEvent, error) {
 	var tempoEvents []TempoEvent
-	
+
 	// Verify time format is supported
 	_, ok := smfData.TimeFormat.(smf.MetricTicks)
 	if !ok {
 		return nil, fmt.Errorf("unsupported time format")
 	}
-	
+
 	// Search all tracks for tempo events
 	for _, track := range smfData.Tracks {
 		var currentTime uint32
-		
+
 		for _, event := range track {
 			currentTime += event.Delta
-			
+
 			msg := event.Message
 			var bpm float64
-			
+
 			// Check for tempo meta events
 			if msg.GetMetaTempo(&bpm) {
-				
+
 				tempoEvents = append(tempoEvents, TempoEvent{
 					Time: currentTime,
 					BPM:  bpm,
@@ -156,12 +162,12 @@ func extractTempoMap(smfData *smf.SMF) ([]TempoEvent, error) {
 			}
 		}
 	}
-	
+
 	// Sort by time
 	sort.Slice(tempoEvents, func(i, j int) bool {
 		return tempoEvents[i].Time < tempoEvents[j].Time
 	})
-	
+
 	// If no tempo events found, assume 120 BPM
 	if len(tempoEvents) == 0 {
 		tempoEvents = append(tempoEvents, TempoEvent{
@@ -169,18 +175,18 @@ func extractTempoMap(smfData *smf.SMF) ([]TempoEvent, error) {
 			BPM:  120.0,
 		})
 	}
-	
+
 	return tempoEvents, nil
 }
 
 // createMeasuresFromBeats creates measure objects from beat pattern and tempo information
 func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksPerQuarter float64) []Measure {
 	var measures []Measure
-	
+
 	if len(beatNotes) == 0 {
 		return measures
 	}
-	
+
 	// Group beats into measures by finding downbeats
 	var measureStarts []int
 	for i, beat := range beatNotes {
@@ -188,7 +194,7 @@ func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksP
 			measureStarts = append(measureStarts, i)
 		}
 	}
-	
+
 	// Create measures from downbeat groupings
 	for i, startIdx := range measureStarts {
 		var endIdx int
@@ -197,10 +203,10 @@ func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksP
 		} else {
 			endIdx = len(beatNotes)
 		}
-		
+
 		// Count beats in this measure
 		beatsInMeasure := endIdx - startIdx
-		
+
 		startTime := beatNotes[startIdx].Time
 		var endTime uint32
 		if endIdx < len(beatNotes) {
@@ -215,27 +221,27 @@ func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksP
 				endTime = startTime + uint32(ticksPerQuarter) // Assume quarter note
 			}
 		}
-		
+
 		// Find the appropriate tempo for this measure
 		bpm := findBPMAtTime(startTime, tempoMap)
-		
+
 		measure := Measure{
 			StartTime:       startTime,
 			EndTime:         endTime,
 			BeatsPerMeasure: beatsInMeasure,
 			BeatsPerMinute:  bpm,
 		}
-		
+
 		measures = append(measures, measure)
 	}
-	
+
 	return measures
 }
 
 // findBPMAtTime finds the BPM that applies at a given time
 func findBPMAtTime(time uint32, tempoMap []TempoEvent) float64 {
 	bpm := 120.0 // Default BPM
-	
+
 	for _, tempo := range tempoMap {
 		if tempo.Time <= time {
 			bpm = tempo.BPM
@@ -243,7 +249,7 @@ func findBPMAtTime(time uint32, tempoMap []TempoEvent) float64 {
 			break
 		}
 	}
-	
+
 	return bpm
 }
 
@@ -268,7 +274,7 @@ func (t *Timeline) GetTotalDuration() uint32 {
 // String returns a string representation of the timeline
 func (t *Timeline) String() string {
 	result := fmt.Sprintf("Timeline: %d measures, %d beat notes\n", len(t.Measures), len(t.BeatNotes))
-	
+
 	for i, measure := range t.Measures {
 		result += fmt.Sprintf("Measure %d: %d/%d time, %.1f BPM, ticks %d-%d\n",
 			i+1,
@@ -279,6 +285,6 @@ func (t *Timeline) String() string {
 			measure.EndTime,
 		)
 	}
-	
+
 	return result
 }
