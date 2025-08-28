@@ -7,7 +7,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
@@ -157,12 +160,24 @@ type ToneLibGrace struct {
 
 // Audio backing track
 type ToneLibBackingTrack struct {
-	Audio ToneLibAudio `xml:"audio"`
+	Color    string       `xml:"color,attr"`
+	Visible  int          `xml:"visible,attr"`
+	Collapse int          `xml:"collapse,attr"`
+	Lock     int          `xml:"lock,attr"`
+	Solo     int          `xml:"solo,attr"`
+	Mute     int          `xml:"mute,attr"`
+	Opt      int          `xml:"opt,attr"`
+	VolDB    string       `xml:"vol_db,attr"`
+	Audio    ToneLibAudio `xml:"audio"`
 }
 
 type ToneLibAudio struct {
-	Name       string `xml:"name"`
-	TimeOffset string `xml:"time_offset"`
+	Name        string `xml:"name"`
+	DataFile    string `xml:"data_file"`
+	DataLen     int    `xml:"data_len"`
+	TimeOffset  string `xml:"time_offset"`
+	Gain        string `xml:"gain"`
+	ChannelMode int    `xml:"channel_mode"`
 }
 
 // ConvertToToneLib converts a MIDI file to ToneLib the_song.dat XML format
@@ -590,18 +605,9 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 		return fmt.Errorf("failed to write version.info: %w", err)
 	}
 
-	// 2. Create the_song.dat XML file
-	score := createToneLibScore(midiFile, sngFile)
-	songWriter, err := zipWriter.Create("the_song.dat")
-	if err != nil {
-		return fmt.Errorf("failed to create the_song.dat: %w", err)
-	}
-
-	if err := writeScoreXML(score, songWriter); err != nil {
-		return fmt.Errorf("failed to write the_song.dat: %w", err)
-	}
-
-	// 3. Create audio directory and copy song.opus if available
+	// 2. Convert audio first to get the converted data length and path
+	var convertedAudioLen int
+	var audioFilePath string
 	if sngFile != nil {
 		files := sngFile.ListFiles()
 		for _, filename := range files {
@@ -612,18 +618,25 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 					return fmt.Errorf("failed to read audio file: %w", err)
 				}
 
+				// Convert to Ogg Vorbis format using ffmpeg
+				convertedData, err := convertToOggVorbis(audioData, filename)
+				if err != nil {
+					return fmt.Errorf("failed to convert audio to Ogg Vorbis: %w", err)
+				}
+				convertedAudioLen = len(convertedData)
+
 				// Create hash for filename
 				hash := sha256.Sum256([]byte(filename))
 				audioHash := hex.EncodeToString(hash[:])[:16]
-				audioPath := fmt.Sprintf("audio/%s.snd", audioHash)
+				audioFilePath = fmt.Sprintf("audio/%s.snd", audioHash)
 
-				// Write to ZIP
-				audioWriter, err := zipWriter.Create(audioPath)
+				// Write converted audio to ZIP
+				audioWriter, err := zipWriter.Create(audioFilePath)
 				if err != nil {
 					return fmt.Errorf("failed to create audio file in ZIP: %w", err)
 				}
 
-				if _, err := audioWriter.Write(audioData); err != nil {
+				if _, err := audioWriter.Write(convertedData); err != nil {
 					return fmt.Errorf("failed to write audio data: %w", err)
 				}
 				break
@@ -631,7 +644,74 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 		}
 	}
 
+	// 3. Create the_song.dat XML file with correct audio data length and path
+	score := createToneLibScore(midiFile, sngFile)
+	if score.BackingTrack != nil {
+		score.BackingTrack.Audio.DataLen = convertedAudioLen
+		score.BackingTrack.Audio.DataFile = audioFilePath
+	}
+
+	songWriter, err := zipWriter.Create("the_song.dat")
+	if err != nil {
+		return fmt.Errorf("failed to create the_song.dat: %w", err)
+	}
+
+	if err := writeScoreXML(score, songWriter); err != nil {
+		return fmt.Errorf("failed to write the_song.dat: %w", err)
+	}
+
 	return nil
+}
+
+// convertToOggVorbis converts audio data to Ogg Vorbis format using ffmpeg
+func convertToOggVorbis(inputData []byte, filename string) ([]byte, error) {
+	log.Printf("Converting audio file %s to Ogg Vorbis format (size: %d bytes)", filename, len(inputData))
+
+	// Create temporary directory for conversion
+	tempDir, err := os.MkdirTemp("", "tonelib-audio-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Determine input file extension based on the original filename
+	inputExt := filepath.Ext(filename)
+	if inputExt == "" {
+		inputExt = ".opus" // Default to opus if no extension
+	}
+
+	// Create temporary input file
+	inputPath := filepath.Join(tempDir, "input"+inputExt)
+	if err := os.WriteFile(inputPath, inputData, 0644); err != nil {
+		return nil, fmt.Errorf("failed to write input file: %w", err)
+	}
+
+	// Create output path
+	outputPath := filepath.Join(tempDir, "output.ogg")
+
+	// Run ffmpeg to convert to Ogg Vorbis
+	// Parameters match the expected format: stereo, 44100 Hz, ~128000 bps
+	cmd := exec.Command("ffmpeg", "-i", inputPath,
+		"-c:a", "libvorbis", // Use Vorbis codec
+		"-ac", "2", // Stereo (2 channels)
+		"-ar", "44100", // 44100 Hz sample rate
+		"-b:a", "128k", // ~128000 bps bitrate
+		"-y", // Overwrite output file
+		outputPath)
+
+	// Capture any error output
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg conversion failed: %w", err)
+	}
+
+	// Read the converted output
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read converted output: %w", err)
+	}
+
+	log.Printf("Audio conversion completed successfully (output size: %d bytes)", len(outputData))
+	return outputData, nil
 }
 
 func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
@@ -678,14 +758,22 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
 		files := sngFile.ListFiles()
 		for _, filename := range files {
 			if filename == "song.opus" {
-				// Create a hash for the audio file name (simplified approach)
-				hash := sha256.Sum256([]byte(filename))
-				audioHash := hex.EncodeToString(hash[:])[:16] // Use first 16 chars
-
 				score.BackingTrack = &ToneLibBackingTrack{
+					Color:    "ff40a0a0",
+					Visible:  1,
+					Collapse: 0,
+					Lock:     0,
+					Solo:     0,
+					Mute:     0,
+					Opt:      0,
+					VolDB:    "0",
 					Audio: ToneLibAudio{
-						Name:       fmt.Sprintf("audio/%s.snd", audioHash),
-						TimeOffset: "0.0",
+						Name:        filename, // Original filename for display
+						DataFile:    "",       // Will be updated with actual path from conversion
+						DataLen:     0,        // Will be updated with actual converted size
+						TimeOffset:  "0",
+						Gain:        "0",
+						ChannelMode: 0,
 					},
 				}
 				break
