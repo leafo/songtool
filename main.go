@@ -15,7 +15,9 @@ import (
 
 func main() {
 	jsonOutput := flag.Bool("json", false, "Output MIDI information as JSON")
-	exportDrums := flag.Bool("export-drums", false, "Export drum patterns from MIDI file")
+	exportGmDrums := flag.Bool("export-gm-drums", false, "Export drum patterns to General MIDI file")
+	exportGmVocals := flag.Bool("export-gm-vocals", false, "Export vocal melody to General MIDI file")
+	exportGm := flag.Bool("export-gm", false, "Export both drums and vocals to single General MIDI file")
 	printTimeline := flag.Bool("timeline", false, "Print beat timeline from BEAT track")
 	exportToneLib := flag.Bool("export-tonelib-xml", false, "Export to ToneLib the_song.dat XML format")
 	createToneLibSong := flag.Bool("export-tonelib-song", false, "Create complete ToneLib .song file (ZIP archive)")
@@ -75,10 +77,16 @@ func main() {
 
 	}
 
-	if *exportDrums {
+	if *exportGmDrums || *exportGmVocals || *exportGm {
 		outputFile := flag.Arg(1)
 		if outputFile == "" {
-			outputFile = "gm_drums.mid"
+			if *exportGmDrums {
+				outputFile = "gm_drums.mid"
+			} else if *exportGmVocals {
+				outputFile = "gm_vocals.mid"
+			} else if *exportGm {
+				outputFile = "gm_complete.mid"
+			}
 		}
 
 		file, err := os.Create(outputFile)
@@ -88,13 +96,45 @@ func main() {
 		}
 		defer file.Close()
 
-		err = ExportDrumsFromMidi(midiFile, file)
+		exporter := NewGeneralMidiExporter()
+		err = exporter.SetupTimingTrack(midiFile)
 		if err != nil {
-			log.Printf("Error exporting drums: %v\n", err)
+			log.Printf("Error setting up timing track: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("Drums exported to: %s\n", outputFile)
+		if *exportGmDrums || *exportGm {
+			err = exporter.AddDrumTracks(midiFile)
+			if err != nil {
+				log.Printf("Error adding drum tracks: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		if *exportGmVocals || *exportGm {
+			err = exporter.AddVocalTracks(midiFile)
+			if err != nil {
+				log.Printf("Error adding vocal tracks: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		err = exporter.WriteTo(file)
+		if err != nil {
+			log.Printf("Error writing MIDI file: %v\n", err)
+			os.Exit(1)
+		}
+
+		var exportType string
+		if *exportGmDrums && !*exportGmVocals {
+			exportType = "GM Drums"
+		} else if *exportGmVocals && !*exportGmDrums {
+			exportType = "GM Vocals"
+		} else {
+			exportType = "Complete GM"
+		}
+
+		fmt.Printf("%s exported to: %s\n", exportType, outputFile)
 	} else if *printTimeline {
 		printTimeline := func(midiFile *smf.SMF, filename string) {
 			timeline, err := ExtractBeatTimeline(midiFile)

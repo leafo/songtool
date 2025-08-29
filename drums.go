@@ -2,11 +2,7 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
-	"path/filepath"
-	"sort"
-	"strings"
 
 	"gitlab.com/gomidi/midi/v2"
 	"gitlab.com/gomidi/midi/v2/smf"
@@ -72,14 +68,14 @@ func (dn *DrumNote) toMidiKey() (uint8, error) {
 	return gmKey, nil
 }
 
-// ExportDrumsFromMidi extracts expert difficulty drums from a Rock Band MIDI file
-// and converts them to GM standard drums, outputting to the provided writer
-func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
+// AddDrumTracks extracts expert difficulty drums from a Rock Band MIDI file
+// and adds them as GM standard drums to the exporter
+func (e *GeneralMidiExporter) AddDrumTracks(sourceData *smf.SMF) error {
 	// Find the PART DRUMS track
 	var drumTrack smf.Track
 	var drumTrackFound bool
 
-	for _, track := range smfData.Tracks {
+	for _, track := range sourceData.Tracks {
 		trackName := getTrackName(track)
 		if trackName == "PART DRUMS" {
 			drumTrack = track
@@ -92,115 +88,58 @@ func ExportDrumsFromMidi(smfData *smf.SMF, writer io.Writer) error {
 		return fmt.Errorf("no 'PART DRUMS' track found")
 	}
 
-	// Extract Expert difficulty drum notes (MIDI range 96-100)
-	expertDrumNotes := extractDrumNotes(drumTrack)
-
-	if len(expertDrumNotes) == 0 {
+	// Extract drum notes
+	drumNotes := extractDrumNotes(drumTrack)
+	if len(drumNotes) == 0 {
 		return fmt.Errorf("no expert drum notes found")
 	}
 
-	// Create new MIDI file with GM drums (Format 1 - multi-track)
-	// Use the same time format as the original file
-	newSMF := smf.NewSMF1()
-	newSMF.TimeFormat = smfData.TimeFormat // Preserve original timing resolution
+	// Convert drum notes to MIDI events
+	var events []MidiEvent
 
-	// Track 0: Copy tempo/conductor information from original MIDI
-	tempoTrack := extractTempoTrack(smfData)
-	newSMF.Add(tempoTrack)
-
-	// Track 1: Drums track
-	drumsTrack := smf.Track{}
-
-	// Add track name meta event
-	trackNameMsg := smf.Message(smf.MetaTrackSequenceName("Drums"))
-	drumsTrack = append(drumsTrack, smf.Event{Delta: 0, Message: trackNameMsg})
-
-	// Collect all MIDI events with absolute timestamps
-	type midiEvent struct {
-		time    uint32
-		message smf.Message
-	}
-
-	var allEvents []midiEvent
-
-	// generate events for drum notes
-	for i, note := range expertDrumNotes {
-		// Convert to GM drums (handles both regular and Pro Drums)
+	for i, note := range drumNotes {
+		// Convert to GM drums
 		gmNote, err := note.toMidiKey()
 		if err != nil {
-			log.Printf("Error converting drum note to General MIDI key: %v\n", err)
+			log.Printf("Error converting drum note to General MIDI key: %v", err)
 			continue
 		}
 
-		// append Note On event
+		// Add Note On event
 		noteOnMsg := smf.Message(midi.NoteOn(gmDrumChannel, gmNote, note.Velocity))
-		allEvents = append(allEvents, midiEvent{time: note.Time, message: noteOnMsg})
+		events = append(events, MidiEvent{Time: note.Time, Message: noteOnMsg})
 
+		// Calculate end time with overlap detection
 		endTime := note.Time + hitDurationTicks
-
-		// Look ahead to see if this note duration overlaps with a repeat note, and
-		// truncate the end time to the start time of that note
-		for j := i + 1; j < len(expertDrumNotes); j++ {
-			nextNote := expertDrumNotes[j]
-
-			// Stop looking if the next note is beyond our end time
+		for j := i + 1; j < len(drumNotes); j++ {
+			nextNote := drumNotes[j]
 			if nextNote.Time >= endTime {
 				break
 			}
-
-			// Check if this is the same GM drum sound
 			nextGmNote, err := nextNote.toMidiKey()
 			if err != nil {
 				continue
 			}
-
 			if nextGmNote == gmNote {
-				// Truncate end time to when the next note starts
 				endTime = nextNote.Time
 				break
 			}
 		}
 
-		// append Note Off event
+		// Add Note Off event
 		noteOffMsg := smf.Message(midi.NoteOff(gmDrumChannel, gmNote))
-		allEvents = append(allEvents, midiEvent{time: endTime, message: noteOffMsg})
+		events = append(events, MidiEvent{Time: endTime, Message: noteOffMsg})
 	}
 
-	// Sort events by time
-	sort.Slice(allEvents, func(i, j int) bool {
-		if allEvents[i].time == allEvents[j].time {
-			// If times are equal, prioritize note-offs (and vel=0 note-ons) before regular note-ons
-			var ch1, note1, vel1 uint8
-			var ch2, note2, vel2 uint8
-			isNoteOff1 := allEvents[i].message.GetNoteOff(&ch1, &note1, &vel1)
-			isNoteOn2 := allEvents[j].message.GetNoteOn(&ch2, &note2, &vel2)
-
-			if (isNoteOff1 || (isNoteOn2 && vel2 == 0)) && ch1 == ch2 && note1 == note2 {
-				return true
-			}
-		}
-		return allEvents[i].time < allEvents[j].time
-	})
-
-	// Add events to track with proper delta times
-	var lastTime uint32
-	for _, event := range allEvents {
-		delta := event.time - lastTime
-		drumsTrack = append(drumsTrack, smf.Event{Delta: delta, Message: event.message})
-		lastTime = event.time
+	// Add drum track to exporter
+	drumTrackInfo := TrackInfo{
+		Name:    "Drums",
+		Channel: gmDrumChannel,
+		Program: 0, // Drums don't use program change (channel 9)
+		Events:  events,
 	}
 
-	// Add end of track meta event to drums track
-	drumsTrack = append(drumsTrack, smf.Event{Delta: 0, Message: smf.EOT})
-	newSMF.Add(drumsTrack)
-
-	// Write the new MIDI file to the provided writer
-	_, err := newSMF.WriteTo(writer)
-	if err != nil {
-		return fmt.Errorf("error writing MIDI file: %w", err)
-	}
-
-	return nil
+	return e.addTrack(drumTrackInfo)
 }
 
 // extractDrumNotes finds all expert difficulty drum notes (96-100) in the drum track
@@ -274,50 +213,4 @@ func extractDrumNotes(drumTrack smf.Track) []DrumNote {
 	}
 
 	return drumNotes
-}
-
-// generateDrumOutputFilename creates an appropriate output filename for the GM drum export
-func generateDrumOutputFilename(sourceFilename string) string {
-	base := strings.TrimSuffix(sourceFilename, filepath.Ext(sourceFilename))
-	if strings.Contains(base, "(from SNG)") {
-		base = strings.Replace(base, "notes.mid (from SNG)", "drums_gm", 1)
-	} else {
-		base = base + "_drums_gm"
-	}
-	return base + ".mid"
-}
-
-// extractTempoTrack copies only essential timing events from the original MIDI file's first track
-func extractTempoTrack(smfData *smf.SMF) smf.Track {
-	tempoTrack := smf.Track{}
-
-	if len(smfData.Tracks) == 0 {
-		log.Println("Warning: Missing tempo track, creating default tempo 120bpm")
-		// No tracks, create a basic tempo track
-		tempoMsg := smf.Message(smf.MetaTempo(120.0))
-		tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: tempoMsg})
-		timeSigMsg := smf.Message(smf.MetaTimeSig(4, 4, 24, 8))
-		tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: timeSigMsg})
-	} else {
-		// Copy only tempo, time signature, key signature, and track name events
-		firstTrack := smfData.Tracks[0]
-
-		for _, event := range firstTrack {
-			msg := event.Message
-			msgType := msg.Type()
-
-			// Copy only the specific meta events we want
-			if msgType == smf.MetaTempoMsg ||
-				msgType == smf.MetaTimeSigMsg ||
-				msgType == smf.MetaKeySigMsg ||
-				msgType == smf.MetaTrackNameMsg {
-				tempoTrack = append(tempoTrack, event)
-			}
-			// Ignore all other events
-		}
-	}
-
-	// Always end with End of Track
-	tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: smf.EOT})
-	return tempoTrack
 }
