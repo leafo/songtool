@@ -21,6 +21,7 @@ func main() {
 	printTimeline := flag.Bool("timeline", false, "Print beat timeline from BEAT track")
 	exportToneLib := flag.Bool("export-tonelib-xml", false, "Export to ToneLib the_song.dat XML format")
 	createToneLibSong := flag.Bool("export-tonelib-song", false, "Create complete ToneLib .song file (ZIP archive)")
+	filterTrack := flag.String("filter-track", "", "Filter to show only tracks whose name contains this string (case-insensitive)")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -163,11 +164,11 @@ func main() {
 			}
 		}
 
-		printMidiInfo(midiFile, filename, *jsonOutput)
+		printMidiInfo(midiFile, filename, *jsonOutput, *filterTrack)
 	}
 }
 
-func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
+func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool, filterTrack string) {
 	if jsonOutput {
 		jsonData, err := json.MarshalIndent(smfData, "", "  ")
 		if err != nil {
@@ -190,6 +191,14 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 
 	for i, track := range smfData.Tracks {
 		trackName := getTrackName(track)
+
+		// Apply track filtering if specified
+		if filterTrack != "" {
+			if trackName == "" || !strings.Contains(strings.ToLower(trackName), strings.ToLower(filterTrack)) {
+				continue
+			}
+		}
+
 		if trackName != "" {
 			fmt.Printf("Track %d: %s\n", i, trackName)
 		} else {
@@ -280,6 +289,66 @@ func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool) {
 			fmt.Println("  Instruments:")
 			for ch, inst := range instruments {
 				fmt.Printf("    Channel %d: %s\n", ch, inst)
+			}
+		}
+
+		// If filtering is active, show detailed event information
+		if filterTrack != "" {
+			fmt.Println("  Detailed Events:")
+			printTrackEvents(track)
+		}
+
+		fmt.Println()
+	}
+}
+
+func printTrackEvents(track smf.Track) {
+	var currentTime uint32 = 0
+
+	for eventIndex, event := range track {
+		currentTime += event.Delta
+		msg := event.Message
+		msgType := msg.Type()
+
+		fmt.Printf("    [%d] Tick: %d, Event: %s", eventIndex, currentTime, msgType.String())
+
+		// Extract specific event data for common event types
+		var ch, key, vel uint8
+		var pitchValue int16
+
+		if msg.GetNoteOn(&ch, &key, &vel) {
+			fmt.Printf("(ch=%d, key=%d, vel=%d)", ch, key, vel)
+		} else if msg.GetNoteOff(&ch, &key, &vel) {
+			fmt.Printf("(ch=%d, key=%d, vel=%d)", ch, key, vel)
+		} else if msg.GetControlChange(&ch, &key, &vel) {
+			fmt.Printf("(ch=%d, cc=%d, val=%d)", ch, key, vel)
+		} else if msg.GetProgramChange(&ch, &vel) {
+			fmt.Printf("(ch=%d, program=%d)", ch, vel)
+		} else if msg.GetPitchBend(&ch, &pitchValue, nil) {
+			fmt.Printf("(ch=%d, value=%d)", ch, pitchValue)
+		} else if msg.GetPolyAfterTouch(&ch, &key, &vel) {
+			fmt.Printf("(ch=%d, key=%d, pressure=%d)", ch, key, vel)
+		} else if msg.GetAfterTouch(&ch, &vel) {
+			fmt.Printf("(ch=%d, pressure=%d)", ch, vel)
+		} else {
+			// For meta events and other types, try to extract text/data
+			var text string
+			if msg.GetMetaTrackName(&text) {
+				fmt.Printf("(\"%s\")", text)
+			} else if msg.GetMetaText(&text) {
+				fmt.Printf("(\"%s\")", text)
+			} else if msg.GetMetaLyric(&text) {
+				fmt.Printf("(\"%s\")", text)
+			} else if msg.GetMetaMarker(&text) {
+				fmt.Printf("(\"%s\")", text)
+			} else {
+				var tempo float64
+				var num, denom uint8
+				if msg.GetMetaTempo(&tempo) {
+					fmt.Printf("(%.1f BPM)", tempo)
+				} else if msg.GetMetaTimeSig(&num, &denom, nil, nil) {
+					fmt.Printf("(%d/%d)", num, 1<<denom)
+				}
 			}
 		}
 
