@@ -17,7 +17,8 @@ func main() {
 	jsonOutput := flag.Bool("json", false, "Output MIDI information as JSON")
 	exportGmDrums := flag.Bool("export-gm-drums", false, "Export drum patterns to General MIDI file")
 	exportGmVocals := flag.Bool("export-gm-vocals", false, "Export vocal melody to General MIDI file")
-	exportGm := flag.Bool("export-gm", false, "Export both drums and vocals to single General MIDI file")
+	exportGmBass := flag.Bool("export-gm-bass", false, "Export pro bass to General MIDI file")
+	exportGm := flag.Bool("export-gm", false, "Export drums, vocals, and bass to single General MIDI file")
 	printTimeline := flag.Bool("timeline", false, "Print beat timeline from BEAT track")
 	exportToneLib := flag.Bool("export-tonelib-xml", false, "Export to ToneLib the_song.dat XML format")
 	createToneLibSong := flag.Bool("export-tonelib-song", false, "Create complete ToneLib .song file (ZIP archive)")
@@ -78,13 +79,15 @@ func main() {
 
 	}
 
-	if *exportGmDrums || *exportGmVocals || *exportGm {
+	if *exportGmDrums || *exportGmVocals || *exportGmBass || *exportGm {
 		outputFile := flag.Arg(1)
 		if outputFile == "" {
 			if *exportGmDrums {
 				outputFile = "gm_drums.mid"
 			} else if *exportGmVocals {
 				outputFile = "gm_vocals.mid"
+			} else if *exportGmBass {
+				outputFile = "gm_bass.mid"
 			} else if *exportGm {
 				outputFile = "gm_complete.mid"
 			}
@@ -120,6 +123,14 @@ func main() {
 			}
 		}
 
+		if *exportGmBass || *exportGm {
+			err = exporter.AddBassTracks(midiFile)
+			if err != nil {
+				log.Printf("Error adding bass tracks: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		err = exporter.WriteTo(file)
 		if err != nil {
 			log.Printf("Error writing MIDI file: %v\n", err)
@@ -127,10 +138,12 @@ func main() {
 		}
 
 		var exportType string
-		if *exportGmDrums && !*exportGmVocals {
+		if *exportGmDrums && !*exportGmVocals && !*exportGmBass {
 			exportType = "GM Drums"
-		} else if *exportGmVocals && !*exportGmDrums {
+		} else if *exportGmVocals && !*exportGmDrums && !*exportGmBass {
 			exportType = "GM Vocals"
+		} else if *exportGmBass && !*exportGmDrums && !*exportGmVocals {
+			exportType = "GM Bass"
 		} else {
 			exportType = "Complete GM"
 		}
