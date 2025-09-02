@@ -88,11 +88,15 @@ func (e *GeneralMidiExporter) AddDrumTracks(sourceData *smf.SMF) error {
 		return fmt.Errorf("no 'PART DRUMS' track found")
 	}
 
+	log.Printf("Found PART DRUMS track")
+
 	// Extract drum notes
 	drumNotes := extractDrumNotes(drumTrack)
 	if len(drumNotes) == 0 {
 		return fmt.Errorf("no expert drum notes found")
 	}
+
+	log.Printf("Found %d expert drum notes", len(drumNotes))
 
 	// Convert drum notes to MIDI events
 	var events []MidiEvent
@@ -212,5 +216,6 @@ func extractDrumNotes(drumTrack smf.Track) []DrumNote {
 		}
 	}
 
+	log.Printf("Extracted %d drum notes from PART DRUMS", len(drumNotes))
 	return drumNotes
 }

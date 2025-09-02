@@ -43,6 +43,8 @@ func (e *GeneralMidiExporter) AddVocalTracks(sourceData *smf.SMF) error {
 		return fmt.Errorf("no vocal tracks found")
 	}
 
+	log.Printf("Found %d vocal track(s)", len(vocalTracks))
+
 	// Extract vocal notes from all tracks
 	allVocalNotes := make(map[string][]VocalNote)
 	totalNotes := 0
@@ -52,12 +54,15 @@ func (e *GeneralMidiExporter) AddVocalTracks(sourceData *smf.SMF) error {
 		if len(notes) > 0 {
 			allVocalNotes[trackName] = notes
 			totalNotes += len(notes)
+			log.Printf("Found %d vocal notes in %s", len(notes), trackName)
 		}
 	}
 
 	if totalNotes == 0 {
 		return fmt.Errorf("no vocal notes found in any vocal tracks")
 	}
+
+	log.Printf("Found %d total vocal notes across all tracks", totalNotes)
 
 	// Create track info for each vocal part
 	trackOrder := []string{"PART VOCALS", "HARM1", "HARM2", "HARM3"}
@@ -221,5 +226,6 @@ func extractVocalNotes(vocalTrack smf.Track) []VocalNote {
 	}
 	vocalNotes = filteredVocalNotes
 
+	log.Printf("Extracted %d valid vocal notes", len(vocalNotes))
 	return vocalNotes
 }
