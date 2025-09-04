@@ -15,10 +15,13 @@ type BeatNote struct {
 
 // Measure represents a musical measure with timing information
 type Measure struct {
-	StartTime       uint32  // Start time in ticks
-	EndTime         uint32  // End time in ticks
-	BeatsPerMeasure int     // Number of beats in this measure
-	BeatsPerMinute  float64 // BPM for this measure
+	StartTime        uint32  // Start time in ticks
+	EndTime          uint32  // End time in ticks
+	BeatsPerMeasure  int     // Number of beats in this measure
+	BeatsPerMinute   float64 // Original BPM from MIDI tempo events
+	PreciseStartTime float64 // High-precision expected start time in ticks
+	PreciseEndTime   float64 // High-precision expected end time in ticks
+	OptimalBPM       float64 // BPM calculated to minimize drift for this measure
 }
 
 // Timeline represents the complete beat timeline of a song
@@ -230,10 +233,18 @@ func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksP
 			EndTime:         endTime,
 			BeatsPerMeasure: beatsInMeasure,
 			BeatsPerMinute:  bpm,
+			// Precise timing fields will be calculated later
+			PreciseStartTime: 0,
+			PreciseEndTime:   0,
+			OptimalBPM:       bpm, // Initialize with original BPM
 		}
 
 		measures = append(measures, measure)
 	}
+
+	// Calculate precise timing and optimal BPMs
+	measures = calculatePreciseMeasureTiming(measures, tempoMap, ticksPerQuarter)
+	measures = calculateOptimalMeasureBPM(measures, ticksPerQuarter)
 
 	return measures
 }
@@ -276,15 +287,82 @@ func (t *Timeline) String() string {
 	result := fmt.Sprintf("Timeline: %d measures, %d beat notes\n", len(t.Measures), len(t.BeatNotes))
 
 	for i, measure := range t.Measures {
-		result += fmt.Sprintf("Measure %d: %d/%d time, %.1f BPM, ticks %d-%d\n",
+		result += fmt.Sprintf("Measure %d: %d/%d time, %.1f BPM (optimal: %.1f), ticks %d-%d\n",
 			i+1,
 			measure.BeatsPerMeasure,
 			4, // Assuming quarter note gets the beat for simplicity
 			measure.BeatsPerMinute,
+			measure.OptimalBPM,
 			measure.StartTime,
 			measure.EndTime,
 		)
 	}
 
 	return result
+}
+
+// calculatePreciseMeasureTiming calculates high-precision measure start/end times
+// based on MIDI tempo events and beat pattern
+func calculatePreciseMeasureTiming(measures []Measure, tempoMap []TempoEvent, ticksPerQuarter float64) []Measure {
+	if len(measures) == 0 {
+		return measures
+	}
+
+	// Create a copy of measures to modify
+	preciseMeasures := make([]Measure, len(measures))
+	copy(preciseMeasures, measures)
+
+	// Calculate precise timing for each measure
+	var currentPreciseTime float64 = float64(measures[0].StartTime)
+
+	for i := range preciseMeasures {
+		preciseMeasures[i].PreciseStartTime = currentPreciseTime
+
+		// Calculate expected duration of this measure in ticks based on BPM and beat count
+		bpm := findBPMAtTime(uint32(currentPreciseTime), tempoMap)
+		measureDurationInMinutes := float64(preciseMeasures[i].BeatsPerMeasure) / bpm
+		measureDurationInTicks := measureDurationInMinutes * 60.0 * ticksPerQuarter * bpm / 60.0 // Simplifies to: measureDurationInMinutes * ticksPerQuarter * bpm
+
+		// More precise calculation: duration = (beats_per_measure / bpm) * 60 seconds * (ticks_per_quarter * (bpm/60)) ticks per second
+		measureDurationInTicks = float64(preciseMeasures[i].BeatsPerMeasure) * ticksPerQuarter * (60.0 / bpm)
+
+		currentPreciseTime += measureDurationInTicks
+		preciseMeasures[i].PreciseEndTime = currentPreciseTime
+	}
+
+	return preciseMeasures
+}
+
+// calculateOptimalMeasureBPM calculates the BPM for each measure that minimizes drift
+func calculateOptimalMeasureBPM(measures []Measure, ticksPerQuarter float64) []Measure {
+	if len(measures) == 0 {
+		return measures
+	}
+
+	// Create a copy to modify
+	optimizedMeasures := make([]Measure, len(measures))
+	copy(optimizedMeasures, measures)
+
+	for i := range optimizedMeasures {
+		// Calculate what BPM this measure needs to fit its precise timing
+		preciseStartTime := optimizedMeasures[i].PreciseStartTime
+		preciseEndTime := optimizedMeasures[i].PreciseEndTime
+
+		measureDurationTicks := preciseEndTime - preciseStartTime
+
+		if measureDurationTicks <= 0 {
+			// Fallback to original BPM if calculation fails
+			optimizedMeasures[i].OptimalBPM = optimizedMeasures[i].BeatsPerMinute
+			continue
+		}
+
+		// BPM calculation:
+		// measureDurationTicks = beats_per_measure * ticks_per_quarter * (60 / BPM)
+		// Solving for BPM: BPM = beats_per_measure * ticks_per_quarter * 60 / measureDurationTicks
+		optimalBPM := float64(optimizedMeasures[i].BeatsPerMeasure) * ticksPerQuarter * 60.0 / measureDurationTicks
+
+		optimizedMeasures[i].OptimalBPM = optimalBPM
+	}
+
+	return optimizedMeasures
 }
