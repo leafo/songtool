@@ -15,27 +15,27 @@ import (
 
 // BeatNote represents a beat event from the BEAT track
 type BeatNote struct {
-	Time        uint32  // Absolute time in ticks
-	TimeSeconds float64 // Absolute time in seconds
-	IsDownbeat  bool    // True if this is a downbeat (C-1), false for other beats (C#-1)
+	Time        uint32  `json:"time"`         // Absolute time in ticks
+	TimeSeconds float64 `json:"time_seconds"` // Absolute time in seconds
+	IsDownbeat  bool    `json:"is_downbeat"`  // True if this is a downbeat (C-1), false for other beats (C#-1)
 }
 
 // Measure represents a musical measure with timing information
 type Measure struct {
-	StartTime        uint32     // Start time in ticks
-	EndTime          uint32     // End time in ticks
-	StartTimeSeconds float64    // Start time in seconds
-	EndTimeSeconds   float64    // End time in seconds
-	BeatsPerMeasure  int        // Number of beats in this measure
-	BeatsPerMinute   float64    // Original BPM from MIDI tempo events
-	BeatNotes        []BeatNote // Beat notes contained in this measure
+	StartTime        uint32     `json:"start_time"`         // Start time in ticks
+	EndTime          uint32     `json:"end_time"`           // End time in ticks
+	StartTimeSeconds float64    `json:"start_time_seconds"` // Start time in seconds
+	EndTimeSeconds   float64    `json:"end_time_seconds"`   // End time in seconds
+	BeatsPerMeasure  int        `json:"beats_per_measure"`  // Number of beats in this measure
+	BeatsPerMinute   float64    `json:"beats_per_minute"`   // Original BPM from MIDI tempo events
+	BeatNotes        []BeatNote `json:"beat_notes"`         // Beat notes contained in this measure
 }
 
 // Timeline represents the complete beat timeline of a song
 type Timeline struct {
-	Measures     []Measure
-	BeatNotes    []BeatNote
-	TicksPerBeat float64 // Derived from time signature and tempo
+	Measures     []Measure  `json:"measures"`
+	BeatNotes    []BeatNote `json:"beat_notes"`
+	TicksPerBeat float64    `json:"ticks_per_beat"` // Derived from time signature and tempo
 }
 
 // ExtractBeatTimeline analyzes the BEAT track and creates a timeline with measure information

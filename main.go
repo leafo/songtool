@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	jsonOutput := flag.Bool("json", false, "Output MIDI information as JSON")
+	jsonOutput := flag.Bool("json", false, "Output information as JSON (supported with: default analysis, --timeline)")
 	exportGmDrums := flag.Bool("export-gm-drums", false, "Export drum patterns to General MIDI file")
 	exportGmVocals := flag.Bool("export-gm-vocals", false, "Export vocal melody to General MIDI file")
 	exportGmBass := flag.Bool("export-gm-bass", false, "Export pro bass to General MIDI file")
@@ -158,8 +158,18 @@ func main() {
 				log.Printf("Error extracting timeline: %v\n", err)
 				return
 			}
-			fmt.Printf("Timeline for: %s\n", filename)
-			fmt.Print(timeline.String())
+
+			if *jsonOutput {
+				jsonData, err := json.MarshalIndent(timeline, "", "  ")
+				if err != nil {
+					log.Printf("Error marshaling timeline to JSON: %v\n", err)
+					return
+				}
+				fmt.Println(string(jsonData))
+			} else {
+				fmt.Printf("Timeline for: %s\n", filename)
+				fmt.Print(timeline.String())
+			}
 		}
 		printTimeline(midiFile, filename)
 	} else if *exportToneLib {
