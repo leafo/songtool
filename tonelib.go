@@ -3,8 +3,6 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -157,6 +155,15 @@ const (
 	ToneLibDefaultTempo           = 120
 	ToneLibDefaultBeatsPerMeasure = 4
 	ToneLibDefaultDynamic         = "mf"
+)
+
+// Hardcoded audio filenames that work with ToneLib format
+// tonelib has some relationship between the audio file name and the data_file
+// attribute that I don't know how it works so we just hardcode this pair of
+// names we know work
+const (
+	ToneLibAudioName     = "23e205d645c3eec6.ogg"
+	ToneLibAudioDataFile = "audio/d68e17dff21a0454.snd"
 )
 
 // MusicalNote represents a musical note that can be converted to ToneLib format.
@@ -891,14 +898,8 @@ func processAudioForZip(zipWriter *zip.Writer, sngFile *SngFile) (*AudioProcessi
 		return nil, fmt.Errorf("failed to read merged audio: %w", err)
 	}
 
-	// Create hash for filename
-	audioFilename := "merged_audio.opus"
-	hash := sha256.Sum256([]byte(audioFilename))
-	audioHash := hex.EncodeToString(hash[:])[:16]
-	audioFilePath := fmt.Sprintf("audio/%s.snd", audioHash)
-
-	// Write converted audio to ZIP
-	audioWriter, err := createZipEntryWithCurrentTime(zipWriter, audioFilePath)
+	// Write converted audio to ZIP using hardcoded path that matches ToneLibAudio
+	audioWriter, err := createZipEntryWithCurrentTime(zipWriter, ToneLibAudioDataFile)
 	if err != nil {
 		mergedAudio.Close()
 		return nil, fmt.Errorf("failed to create audio file in ZIP: %w", err)
@@ -912,7 +913,6 @@ func processAudioForZip(zipWriter *zip.Writer, sngFile *SngFile) (*AudioProcessi
 	return &AudioProcessingResult{
 		MergedAudio:       mergedAudio,
 		ConvertedAudioLen: len(convertedData),
-		AudioFilePath:     audioFilePath,
 	}, nil
 }
 
@@ -923,12 +923,19 @@ func generateBeatsFromTimeline(timeline *Timeline) *BeatMap {
 	}
 
 	beats := make([]ToneLibBackingBeat, len(timeline.BeatNotes))
+	beatInMeasure := 0
 
 	for i, beatNote := range timeline.BeatNotes {
+		if beatNote.IsDownbeat {
+			beatInMeasure = 0
+		}
+
 		beats[i] = ToneLibBackingBeat{
-			N: i,
+			N: beatInMeasure,
 			T: fmt.Sprintf("%.15f", beatNote.TimeSeconds), // High precision for timing
 		}
+
+		beatInMeasure++
 	}
 
 	log.Printf("Generated %d beats from timeline data", len(beats))
@@ -947,7 +954,6 @@ func writeToneLibXMLToZip(zipWriter *zip.Writer, midiFile *smf.SMF, sngFile *Sng
 	score := createToneLibScore(midiFile, sngFile, beatMap)
 	if score.BackingTrack != nil && audioResult != nil {
 		score.BackingTrack.Audio.DataLen = audioResult.ConvertedAudioLen
-		score.BackingTrack.Audio.DataFile = audioResult.AudioFilePath
 	}
 
 	songWriter, err := createZipEntryWithCurrentTime(zipWriter, "the_song.dat")
@@ -1043,9 +1049,9 @@ func createBackingTrackIfNeeded(sngFile *SngFile, beatMap *BeatMap) *ToneLibBack
 		Opt:      0,
 		VolDB:    "0",
 		Audio: ToneLibAudio{
-			Name:        "merged.ogg",
-			DataFile:    "", // Will be updated with actual path from conversion
-			DataLen:     0,  // Will be updated with actual converted size
+			Name:        ToneLibAudioName,
+			DataFile:    ToneLibAudioDataFile,
+			DataLen:     0, // Will be updated with actual converted size
 			TimeOffset:  "0",
 			Gain:        "1",
 			ChannelMode: 0,
