@@ -25,6 +25,12 @@ type BeatMap struct {
 	NST      string // Normalized sample time or similar metric
 }
 
+// LyricEvent represents a lyric event with timing information
+type LyricEvent struct {
+	Time  uint32 // Absolute time in ticks
+	Lyric string // Raw lyric text from MIDI (preserves Rock Band formatting)
+}
+
 // ToneLib Score XML structure - represents the complete the_song.dat file
 type ToneLibScore struct {
 	XMLName      xml.Name             `xml:"Score"`
@@ -310,10 +316,22 @@ func createBarIndexFromTimeline(timeline *Timeline) ToneLibBarIndex {
 }
 
 // createTracksFromMidi analyzes MIDI tracks and creates ToneLib tracks
-// Creates drum and pro bass tracks from Rock Band MIDI tracks
-func createTracksFromMidi(midiFile *smf.SMF, numBars int) ToneLibTracks {
+// Creates lyrics, drum, and pro bass tracks from Rock Band MIDI tracks
+func createTracksFromMidi(midiFile *smf.SMF, numBars int, timeline *Timeline) ToneLibTracks {
 	var tracks []ToneLibTrack
 	var trackID int = 1
+
+	// Find and create lyrics track
+	lyricEvents := extractLyricsWithTiming(midiFile)
+	if len(lyricEvents) > 0 && timeline != nil {
+		measureLyrics := groupLyricsByMeasure(lyricEvents, timeline)
+		if len(measureLyrics) > 0 {
+			lyricsTrack := createLyricsTrack(measureLyrics, midiFile, numBars, trackID, timeline)
+			tracks = append(tracks, lyricsTrack)
+			trackID++
+			log.Printf("Created lyrics track with %d measures containing lyrics", len(measureLyrics))
+		}
+	}
 
 	// Find the "PART DRUMS" track specifically
 	var drumTrack smf.Track
@@ -402,50 +420,11 @@ func createTracksFromMidi(midiFile *smf.SMF, numBars int) ToneLibTracks {
 			}
 
 			tracks = append(tracks, toneLibTrack)
+			trackID++
 		}
 	}
 
 	return ToneLibTracks{Tracks: tracks}
-}
-
-// Helper functions for track creation
-func getTrackColor(trackName string, isDrumTrack bool) string {
-	if isDrumTrack {
-		return "fffad11c" // Orange for drums
-	}
-	switch strings.ToUpper(trackName) {
-	case "VOCALS", "VOICE":
-		return "fff5a41c" // Red for vocals
-	case "GUITAR":
-		return "ff00ff00" // Green for guitar
-	case "BASS":
-		return "ff0000ff" // Blue for bass
-	default:
-		return "ffffffff" // White for others
-	}
-}
-
-func getBankForTrack(isDrumTrack bool) int {
-	if isDrumTrack {
-		return 128 // Percussion bank
-	}
-	return 0 // Standard bank
-}
-
-func getProgramForTrack(trackName string, isDrumTrack bool) int {
-	if isDrumTrack {
-		return 0 // Standard drum kit
-	}
-	switch strings.ToUpper(trackName) {
-	case "VOCALS", "VOICE":
-		return 27 // Distorted guitar (often used for vocals)
-	case "GUITAR":
-		return 26 // Electric guitar (jazz)
-	case "BASS":
-		return 34 // Electric bass (fingered)
-	default:
-		return 1 // Acoustic piano
-	}
 }
 
 // createDrumStrings creates string definitions for drum tracks
@@ -471,6 +450,21 @@ func createBassStrings() ToneLibStrings {
 		strings[i] = ToneLibString{
 			ID:     i + 1,
 			Tuning: bassTuning[i],
+		}
+	}
+
+	return ToneLibStrings{Strings: strings}
+}
+
+func createGuitarStrings() ToneLibStrings {
+	// Standard guitar tuning: E(40), A(45), D(50), G(55), B(59), E(64)
+	guitarTuning := [6]int{64, 59, 55, 50, 45, 40} // High to low
+	strings := make([]ToneLibString, 6)
+
+	for i := 0; i < 6; i++ {
+		strings[i] = ToneLibString{
+			ID:     i + 1,
+			Tuning: guitarTuning[i],
 		}
 	}
 
@@ -988,7 +982,7 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) *
 
 	// Create tracks from MIDI - ensure bar count matches BarIndex
 	numBars := len(score.BarIndex.Bars)
-	score.Tracks = createTracksFromMidi(midiFile, numBars)
+	score.Tracks = createTracksFromMidi(midiFile, numBars, timeline)
 
 	// Add backing track reference if SNG file has audio
 	if sngFile != nil {
@@ -1039,4 +1033,243 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) *
 	}
 
 	return score
+}
+
+// extractLyricsWithTiming extracts lyric events with timing from PART VOCALS track
+func extractLyricsWithTiming(midiFile *smf.SMF) []LyricEvent {
+	var lyricEvents []LyricEvent
+
+	// Find the PART VOCALS track
+	var vocalTrack smf.Track
+	var found bool
+
+	for _, track := range midiFile.Tracks {
+		trackName := getTrackName(track)
+		if trackName == "PART VOCALS" {
+			vocalTrack = track
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return lyricEvents
+	}
+
+	// Extract lyric events with timing
+	var currentTime uint32
+	for _, event := range vocalTrack {
+		currentTime += event.Delta
+		msg := event.Message
+
+		var lyric, text string
+		if msg.GetMetaLyric(&lyric) {
+			lyricEvents = append(lyricEvents, LyricEvent{
+				Time:  currentTime,
+				Lyric: lyric,
+			})
+		} else if msg.GetMetaText(&text) {
+			// Skip bracketed animation markers, look for actual lyrics
+			if len(text) > 0 && text[0] != '[' {
+				lyricEvents = append(lyricEvents, LyricEvent{
+					Time:  currentTime,
+					Lyric: text,
+				})
+			}
+		}
+	}
+
+	log.Printf("Extracted %d lyric events from PART VOCALS", len(lyricEvents))
+	return lyricEvents
+}
+
+// MeasureLyrics represents lyrics grouped by measure
+type MeasureLyrics struct {
+	MeasureNum int    // 1-based measure number
+	StartTime  uint32 // Time of first lyric in measure
+	Text       string // Merged text for the measure
+}
+
+// groupLyricsByMeasure groups lyric events by measure and merges adjacent lyrics within each measure
+func groupLyricsByMeasure(lyricEvents []LyricEvent, timeline *Timeline) []MeasureLyrics {
+	var measureLyrics []MeasureLyrics
+
+	if len(lyricEvents) == 0 || timeline == nil || len(timeline.Measures) == 0 {
+		return measureLyrics
+	}
+
+	// Group lyrics by measure
+	measureGroups := make(map[int][]LyricEvent)
+
+	for _, lyricEvent := range lyricEvents {
+		// Find which measure this lyric belongs to
+		measureNum := -1
+		for i, measure := range timeline.Measures {
+			if lyricEvent.Time >= measure.StartTime && lyricEvent.Time < measure.EndTime {
+				measureNum = i + 1 // 1-based measure numbering
+				break
+			}
+		}
+
+		if measureNum > 0 {
+			measureGroups[measureNum] = append(measureGroups[measureNum], lyricEvent)
+		}
+	}
+
+	// Process each measure's lyrics
+	for measureNum := 1; measureNum <= len(timeline.Measures); measureNum++ {
+		events, exists := measureGroups[measureNum]
+		if !exists || len(events) == 0 {
+			continue
+		}
+
+		// Sort events by time within the measure
+		// (they should already be sorted, but ensure consistency)
+		for i := 0; i < len(events)-1; i++ {
+			for j := i + 1; j < len(events); j++ {
+				if events[i].Time > events[j].Time {
+					events[i], events[j] = events[j], events[i]
+				}
+			}
+		}
+
+		// Collect raw lyrics for this measure
+		var rawLyrics []string
+		for _, event := range events {
+			if event.Lyric != "" {
+				rawLyrics = append(rawLyrics, event.Lyric)
+			}
+		}
+
+		if len(rawLyrics) > 0 {
+			// Use existing Rock Band lyric parsing to merge and clean up lyrics
+			mergedText := parseRockBandLyrics(rawLyrics)
+
+			measureLyrics = append(measureLyrics, MeasureLyrics{
+				MeasureNum: measureNum,
+				StartTime:  events[0].Time,
+				Text:       mergedText,
+			})
+		}
+	}
+
+	log.Printf("Grouped lyrics into %d measures", len(measureLyrics))
+	return measureLyrics
+}
+
+// createLyricsTrack creates a ToneLib lyrics track from measure-grouped lyrics
+func createLyricsTrack(measureLyrics []MeasureLyrics, midiFile *smf.SMF, numBars int, trackID int, timeline *Timeline) ToneLibTrack {
+	toneLibTrack := ToneLibTrack{
+		Name:     "Lyrics",
+		Color:    "ff00ff00", // Green color for lyrics
+		Visible:  1,
+		Collapse: 0,
+		Lock:     0,
+		Solo:     0,
+		Mute:     0,
+		Opt:      0,
+		VolDB:    "-0.1574783325195312",
+		Bank:     0, // Standard bank
+		Program:  1, // Acoustic piano
+		Chorus:   0,
+		Reverb:   0,
+		Phaser:   0,
+		Tremolo:  0,
+		ID:       trackID,
+		Offset:   24,                    // Required for correct pitch playback
+		Strings:  createGuitarStrings(), // no notes are used here, use standard tuning
+		Bars:     createLyricsBarsFromMeasures(measureLyrics, midiFile, numBars, timeline),
+	}
+
+	return toneLibTrack
+}
+
+// createLyricsBarsFromMeasures converts measure-grouped lyrics to ToneLib bars
+func createLyricsBarsFromMeasures(measureLyrics []MeasureLyrics, midiFile *smf.SMF, numBars int, timeline *Timeline) ToneLibTrackBars {
+	// Get ticks per quarter note for beat calculations
+	ticksPerQuarter := int(480) // Default
+	if tf, ok := midiFile.TimeFormat.(smf.MetricTicks); ok {
+		ticksPerQuarter = int(tf)
+	}
+	ticksPerEighth := ticksPerQuarter / 2
+
+	// Create a map for quick lookup of lyrics by measure number
+	lyricsByMeasure := make(map[int]MeasureLyrics)
+	for _, measureLyric := range measureLyrics {
+		lyricsByMeasure[measureLyric.MeasureNum] = measureLyric
+	}
+
+	// Create ToneLib bars - exactly numBars to match BarIndex
+	var bars []ToneLibTrackBar
+	emptyBeats := ""
+
+	for barID := 1; barID <= numBars; barID++ {
+		bar := ToneLibTrackBar{
+			ID:       barID,
+			Beats:    []ToneLibBeat{},
+			BeatsEnd: &emptyBeats, // Required empty closing tag for each bar
+		}
+
+		// Add clef and key signature to first bar only
+		if barID == 1 {
+			bar.Clef = &ToneLibClef{Value: ToneLibTrebleClef}
+			bar.KeySign = &ToneLibKeySign{Value: 0}
+		}
+
+		// Check if this measure has lyrics
+		if measureLyric, hasLyrics := lyricsByMeasure[barID]; hasLyrics && measureLyric.Text != "" {
+			// Calculate the correct beat position within the measure
+			var beats []ToneLibBeat
+
+			if timeline != nil && barID <= len(timeline.Measures) {
+				measure := timeline.Measures[barID-1] // Convert to 0-based index
+
+				// Calculate relative position within measure
+				relativeTicks := int(measureLyric.StartTime - measure.StartTime)
+
+				// Quantize to nearest eighth note position (0-7 for 4/4 time)
+				eighthNotePosition := (relativeTicks + ticksPerEighth/2) / ticksPerEighth
+				if eighthNotePosition < 0 {
+					eighthNotePosition = 0
+				}
+				if eighthNotePosition > 7 {
+					eighthNotePosition = 7
+				}
+
+				// Create beats with text at calculated position
+				for i := 0; i < 8; i++ {
+					if i == eighthNotePosition {
+						// Text beat at the calculated position
+						beats = append(beats, ToneLibBeat{
+							Duration: 8, // Eighth note
+							Dyn:      "mf",
+							Text:     &ToneLibText{Value: measureLyric.Text},
+						})
+					} else {
+						// Rest beat
+						beats = append(beats, ToneLibBeat{
+							Duration: 8, // Eighth note rest
+							Dyn:      "mf",
+						})
+					}
+				}
+			} else {
+				// Fallback: place text at beginning if no timeline info
+				beats = []ToneLibBeat{
+					{Duration: 4, Dyn: "mf", Text: &ToneLibText{Value: measureLyric.Text}},
+					{Duration: 2, Dyn: "mf"},
+					{Duration: 2, Dyn: "mf"},
+				}
+			}
+
+			bar.Beats = beats
+		} else {
+			// Empty measure - whole rest
+			bar.Beats = []ToneLibBeat{{Duration: 1, Dyn: "mf"}}
+		}
+
+		bars = append(bars, bar)
+	}
+
+	return ToneLibTrackBars{Bars: bars}
 }
