@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"log"
+	"os/exec"
 	"sort"
+	"strconv"
+	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
 )
@@ -21,7 +26,6 @@ type Measure struct {
 	BeatsPerMinute   float64 // Original BPM from MIDI tempo events
 	PreciseStartTime float64 // High-precision expected start time in ticks
 	PreciseEndTime   float64 // High-precision expected end time in ticks
-	OptimalBPM       float64 // BPM calculated to minimize drift for this measure
 }
 
 // Timeline represents the complete beat timeline of a song
@@ -236,15 +240,13 @@ func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksP
 			// Precise timing fields will be calculated later
 			PreciseStartTime: 0,
 			PreciseEndTime:   0,
-			OptimalBPM:       bpm, // Initialize with original BPM
 		}
 
 		measures = append(measures, measure)
 	}
 
-	// Calculate precise timing and optimal BPMs
+	// Calculate precise timing
 	measures = calculatePreciseMeasureTiming(measures, tempoMap, ticksPerQuarter)
-	measures = calculateOptimalMeasureBPM(measures, ticksPerQuarter)
 
 	return measures
 }
@@ -286,16 +288,39 @@ func (t *Timeline) GetTotalDuration() uint32 {
 func (t *Timeline) String() string {
 	result := fmt.Sprintf("Timeline: %d measures, %d beat notes\n", len(t.Measures), len(t.BeatNotes))
 
+	var elapsedSeconds float64 = 0.0
+
 	for i, measure := range t.Measures {
-		result += fmt.Sprintf("Measure %d: %d/%d time, %.1f BPM (optimal: %.1f), ticks %d-%d\n",
+		result += fmt.Sprintf("Measure %d: %d/%d time, %.1f BPM, ticks %d-%d\n",
 			i+1,
 			measure.BeatsPerMeasure,
 			4, // Assuming quarter note gets the beat for simplicity
 			measure.BeatsPerMinute,
-			measure.OptimalBPM,
 			measure.StartTime,
 			measure.EndTime,
 		)
+
+		// Find beats within this measure
+		measureBeatIndex := 1
+		for _, beat := range t.BeatNotes {
+			if beat.Time >= measure.StartTime && beat.Time < measure.EndTime {
+				// Calculate time offset from measure start
+				ticksFromMeasureStart := beat.Time - measure.StartTime
+				// Convert ticks to seconds using measure's BPM
+				ticksPerSecond := t.TicksPerBeat * measure.BeatsPerMinute / 60.0
+				secondsFromMeasureStart := float64(ticksFromMeasureStart) / ticksPerSecond
+				beatTimeSeconds := elapsedSeconds + secondsFromMeasureStart
+
+				result += fmt.Sprintf("  * Beat %d: %.6f\n", measureBeatIndex, beatTimeSeconds)
+				measureBeatIndex++
+			}
+		}
+
+		// Add measure duration to elapsed time
+		measureDurationTicks := measure.EndTime - measure.StartTime
+		ticksPerSecond := t.TicksPerBeat * measure.BeatsPerMinute / 60.0
+		measureDurationSeconds := float64(measureDurationTicks) / ticksPerSecond
+		elapsedSeconds += measureDurationSeconds
 	}
 
 	return result
@@ -333,36 +358,40 @@ func calculatePreciseMeasureTiming(measures []Measure, tempoMap []TempoEvent, ti
 	return preciseMeasures
 }
 
-// calculateOptimalMeasureBPM calculates the BPM for each measure that minimizes drift
-func calculateOptimalMeasureBPM(measures []Measure, ticksPerQuarter float64) []Measure {
-	if len(measures) == 0 {
-		return measures
+// ExtractAudioBeats uses aubiotrack to detect beats from an audio file
+// Returns a slice of beat timestamps in seconds
+func ExtractAudioBeats(audioFilePath string) ([]float64, error) {
+	// Run aubiotrack on the audio file
+	cmd := exec.Command("aubiotrack", audioFilePath)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("aubiotrack failed: %w", err)
 	}
 
-	// Create a copy to modify
-	optimizedMeasures := make([]Measure, len(measures))
-	copy(optimizedMeasures, measures)
+	// Parse aubiotrack output (format: one beat time per line in seconds)
+	var beats []float64
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 
-	for i := range optimizedMeasures {
-		// Calculate what BPM this measure needs to fit its precise timing
-		preciseStartTime := optimizedMeasures[i].PreciseStartTime
-		preciseEndTime := optimizedMeasures[i].PreciseEndTime
-
-		measureDurationTicks := preciseEndTime - preciseStartTime
-
-		if measureDurationTicks <= 0 {
-			// Fallback to original BPM if calculation fails
-			optimizedMeasures[i].OptimalBPM = optimizedMeasures[i].BeatsPerMinute
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
 			continue
 		}
 
-		// BPM calculation:
-		// measureDurationTicks = beats_per_measure * ticks_per_quarter * (60 / BPM)
-		// Solving for BPM: BPM = beats_per_measure * ticks_per_quarter * 60 / measureDurationTicks
-		optimalBPM := float64(optimizedMeasures[i].BeatsPerMeasure) * ticksPerQuarter * 60.0 / measureDurationTicks
+		// Parse the beat time (in seconds)
+		beatTime, err := strconv.ParseFloat(line, 64)
+		if err != nil {
+			log.Printf("Warning: failed to parse beat time '%s': %v", line, err)
+			continue
+		}
 
-		optimizedMeasures[i].OptimalBPM = optimalBPM
+		beats = append(beats, beatTime)
 	}
 
-	return optimizedMeasures
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading aubiotrack output: %w", err)
+	}
+
+	log.Printf("Extracted %d beats from aubiotrack", len(beats))
+	return beats, nil
 }
