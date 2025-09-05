@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
@@ -37,6 +38,7 @@ func main() {
 
 	var sngFile *SngFile
 	var midiFile *smf.SMF
+	var chartFile *ChartFile
 	var err error
 
 	ext := strings.ToLower(filepath.Ext(filename))
@@ -63,6 +65,13 @@ func main() {
 				log.Printf("Error reading MIDI data: %v\n", err)
 			}
 		}
+	} else if ext == ".chart" {
+		// treat the file as a chart file
+		chartFile, err = OpenChartFile(filename)
+		if err != nil {
+			log.Printf("Error opening chart file: %v\n", err)
+			os.Exit(1)
+		}
 	} else {
 		// treat the file as a regular midi file
 
@@ -82,6 +91,10 @@ func main() {
 	}
 
 	if *exportGmDrums || *exportGmVocals || *exportGmBass || *exportGm {
+		if midiFile == nil {
+			log.Printf("No MIDI data available for export\n")
+			os.Exit(1)
+		}
 		outputFile := flag.Arg(1)
 		if outputFile == "" {
 			if *exportGmDrums {
@@ -152,6 +165,10 @@ func main() {
 
 		fmt.Printf("%s exported to: %s\n", exportType, outputFile)
 	} else if *printTimeline {
+		if midiFile == nil {
+			log.Printf("No MIDI data available for timeline extraction\n")
+			os.Exit(1)
+		}
 		printTimeline := func(midiFile *smf.SMF, filename string) {
 			timeline, err := ExtractBeatTimeline(midiFile)
 			if err != nil {
@@ -173,8 +190,16 @@ func main() {
 		}
 		printTimeline(midiFile, filename)
 	} else if *exportToneLib {
+		if midiFile == nil {
+			log.Printf("No MIDI data available for ToneLib export\n")
+			os.Exit(1)
+		}
 		exportToToneLib(midiFile, sngFile, filename)
 	} else if *createToneLibSong {
+		if midiFile == nil {
+			log.Printf("No MIDI data available for ToneLib song creation\n")
+			os.Exit(1)
+		}
 		outputFile := flag.Arg(1)
 		if outputFile == "" {
 			outputFile = "output.song"
@@ -195,11 +220,30 @@ func main() {
 			}
 		}
 
+		if chartFile != nil {
+			printChartInfo(chartFile, *jsonOutput, *filterTrack)
+			return
+		}
+
+		if midiFile == nil {
+			log.Printf("No valid chart or MIDI data found in file: %s\n", filename)
+			os.Exit(1)
+		}
+
 		printMidiInfo(midiFile, filename, *jsonOutput, *filterTrack)
 	}
 }
 
 func printMidiInfo(smfData *smf.SMF, filename string, jsonOutput bool, filterTrack string) {
+	if smfData == nil {
+		if jsonOutput {
+			fmt.Println("null")
+		} else {
+			fmt.Printf("No MIDI data available\n")
+		}
+		return
+	}
+
 	if jsonOutput {
 		jsonData, err := json.MarshalIndent(smfData, "", "  ")
 		if err != nil {
@@ -524,3 +568,246 @@ func extractFileFromSng(sngFile *SngFile, filename string) {
 	}
 }
 
+func printChartInfo(chart *ChartFile, jsonOutput bool, filterTrack string) {
+	if jsonOutput {
+		jsonData, err := json.MarshalIndent(chart, "", "  ")
+		if err != nil {
+			log.Printf("Error marshaling chart to JSON: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(jsonData))
+		return
+	}
+
+	fmt.Printf("Chart File: %s\n", chart.Filename)
+	if chart.Song.Name != "" {
+		fmt.Printf("Title: %s\n", chart.Song.Name)
+	}
+	if chart.Song.Artist != "" {
+		fmt.Printf("Artist: %s\n", chart.Song.Artist)
+	}
+	if chart.Song.Album != "" {
+		fmt.Printf("Album: %s\n", chart.Song.Album)
+	}
+	if chart.Song.Charter != "" {
+		fmt.Printf("Charter: %s\n", chart.Song.Charter)
+	}
+	if chart.Song.Year != "" {
+		fmt.Printf("Year: %s\n", chart.Song.Year)
+	}
+	if chart.Song.Genre != "" {
+		fmt.Printf("Genre: %s\n", chart.Song.Genre)
+	}
+	fmt.Printf("Resolution: %d ticks per quarter note\n", chart.Song.Resolution)
+	fmt.Printf("Offset: %d\n", chart.Song.Offset)
+	if chart.Song.MusicStream != "" {
+		fmt.Printf("Audio: %s\n", chart.Song.MusicStream)
+	}
+	fmt.Println()
+
+	// Sync track info
+	fmt.Printf("Sync Track:\n")
+	fmt.Printf("  BPM changes: %d\n", len(chart.SyncTrack.BPMEvents))
+	if len(chart.SyncTrack.BPMEvents) > 0 {
+		firstBPM := chart.SyncTrack.BPMEvents[0]
+		fmt.Printf("  Starting BPM: %.1f\n", float64(firstBPM.BPM)/1000.0)
+	}
+	fmt.Printf("  Time signature changes: %d\n", len(chart.SyncTrack.TimeSigEvents))
+	fmt.Printf("  Anchor events: %d\n", len(chart.SyncTrack.AnchorEvents))
+	fmt.Println()
+
+	// Events info
+	fmt.Printf("Global Events: %d\n", len(chart.Events.GlobalEvents))
+
+	// Count lyrics and sections
+	var lyricCount, sectionCount int
+	for _, event := range chart.Events.GlobalEvents {
+		if strings.HasPrefix(event.Text, "lyric ") {
+			lyricCount++
+		} else if strings.HasPrefix(event.Text, "section ") {
+			sectionCount++
+		}
+	}
+	if lyricCount > 0 {
+		fmt.Printf("  Lyrics: %d\n", lyricCount)
+	}
+	if sectionCount > 0 {
+		fmt.Printf("  Sections: %d\n", sectionCount)
+	}
+	fmt.Println()
+
+	// Track info
+	fmt.Printf("Tracks: %d\n", len(chart.Tracks))
+	for trackName, track := range chart.Tracks {
+		// Apply track filtering if specified
+		if filterTrack != "" {
+			if !strings.Contains(strings.ToLower(trackName), strings.ToLower(filterTrack)) {
+				continue
+			}
+		}
+
+		fmt.Printf("  %s:\n", trackName)
+		fmt.Printf("    Notes: %d\n", len(track.Notes))
+		fmt.Printf("    Specials: %d\n", len(track.Specials))
+		fmt.Printf("    Track Events: %d\n", len(track.TrackEvents))
+
+		if len(track.Notes) > 0 {
+			firstNote := track.Notes[0]
+			lastNote := track.Notes[len(track.Notes)-1]
+			duration := lastNote.Tick - firstNote.Tick
+			durationSeconds := calculateTickDuration(chart, firstNote.Tick, lastNote.Tick)
+			fmt.Printf("    Duration: %d ticks (%.2f seconds)\n", duration, durationSeconds)
+
+			// Count notes by fret
+			fretCounts := make(map[uint8]int)
+			sustainCount := 0
+			for _, note := range track.Notes {
+				fretCounts[note.Fret]++
+				if note.Sustain > 0 {
+					sustainCount++
+				}
+			}
+
+			fmt.Printf("    Notes by fret: ")
+			for fret := uint8(0); fret <= 7; fret++ {
+				if count, exists := fretCounts[fret]; exists && count > 0 {
+					fmt.Printf("F%d:%d ", fret, count)
+				}
+			}
+			fmt.Println()
+
+			if sustainCount > 0 {
+				fmt.Printf("    Sustained notes: %d\n", sustainCount)
+			}
+		}
+
+		// Show special events breakdown
+		if len(track.Specials) > 0 {
+			specialTypes := make(map[uint8]int)
+			for _, special := range track.Specials {
+				specialTypes[special.Type]++
+			}
+			fmt.Printf("    Special types: ")
+			for sType, count := range specialTypes {
+				var typeName string
+				switch sType {
+				case 2:
+					typeName = "Starpower"
+				case 64:
+					typeName = "DrumFill"
+				case 65:
+					typeName = "DrumRoll"
+				case 66:
+					typeName = "DrumRollSpecial"
+				default:
+					typeName = fmt.Sprintf("S%d", sType)
+				}
+				fmt.Printf("%s:%d ", typeName, count)
+			}
+			fmt.Println()
+		}
+
+		// If filtering is active, show detailed event information
+		if filterTrack != "" {
+			fmt.Printf("    Detailed Events:\n")
+			printChartTrackEvents(&track)
+		}
+
+		fmt.Println()
+	}
+}
+
+func calculateTickDuration(chart *ChartFile, startTick, endTick uint32) float64 {
+	if chart.Song.Resolution == 0 {
+		return 0
+	}
+
+	totalSeconds := 0.0
+	currentTick := startTick
+
+	for _, bpmEvent := range chart.SyncTrack.BPMEvents {
+		if bpmEvent.Tick <= startTick {
+			continue
+		}
+
+		nextTick := bpmEvent.Tick
+		if nextTick > endTick {
+			nextTick = endTick
+		}
+
+		if currentTick < nextTick {
+			bpm := chart.GetBPMAtTick(currentTick)
+			ticksInSegment := nextTick - currentTick
+			secondsInSegment := float64(ticksInSegment) / float64(chart.Song.Resolution) * 60.0 / bpm
+			totalSeconds += secondsInSegment
+		}
+
+		currentTick = nextTick
+		if currentTick >= endTick {
+			break
+		}
+	}
+
+	// Handle remaining ticks if any
+	if currentTick < endTick {
+		bpm := chart.GetBPMAtTick(currentTick)
+		ticksInSegment := endTick - currentTick
+		secondsInSegment := float64(ticksInSegment) / float64(chart.Song.Resolution) * 60.0 / bpm
+		totalSeconds += secondsInSegment
+	}
+
+	return totalSeconds
+}
+
+func printChartTrackEvents(track *TrackSection) {
+	// Combine all events and sort by tick
+	type eventInfo struct {
+		tick uint32
+		text string
+	}
+
+	var allEvents []eventInfo
+
+	for _, note := range track.Notes {
+		fretName := fmt.Sprintf("Fret %d", note.Fret)
+		if note.Fret == 7 {
+			fretName = "Open"
+		}
+		text := fmt.Sprintf("Note %s", fretName)
+		if note.Sustain > 0 {
+			text += fmt.Sprintf(" (sustain: %d)", note.Sustain)
+		}
+		allEvents = append(allEvents, eventInfo{note.Tick, text})
+	}
+
+	for _, special := range track.Specials {
+		var typeName string
+		switch special.Type {
+		case 2:
+			typeName = "Starpower"
+		case 64:
+			typeName = "Drum Fill"
+		case 65:
+			typeName = "Drum Roll"
+		case 66:
+			typeName = "Special Drum Roll"
+		default:
+			typeName = fmt.Sprintf("Special %d", special.Type)
+		}
+		text := fmt.Sprintf("%s (length: %d)", typeName, special.Length)
+		allEvents = append(allEvents, eventInfo{special.Tick, text})
+	}
+
+	for _, trackEvent := range track.TrackEvents {
+		allEvents = append(allEvents, eventInfo{trackEvent.Tick, fmt.Sprintf("Event: %s", trackEvent.Text)})
+	}
+
+	// Sort by tick
+	sort.Slice(allEvents, func(i, j int) bool {
+		return allEvents[i].tick < allEvents[j].tick
+	})
+
+	for _, event := range allEvents {
+		fmt.Printf("      Tick %d: %s\n", event.tick, event.text)
+	}
+}
