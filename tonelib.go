@@ -123,6 +123,12 @@ type ToneLibTrackBar struct {
 	BeatsEnd *string         `xml:"Beats"` // Required empty closing tag
 }
 
+const (
+	ToneLibTrebleClef      = 1
+	ToneLibBassClef        = 2
+	ToneLibPercussionCleff = 5
+)
+
 type ToneLibClef struct {
 	Value int `xml:"value,attr"`
 }
@@ -304,9 +310,10 @@ func createBarIndexFromTimeline(timeline *Timeline) ToneLibBarIndex {
 }
 
 // createTracksFromMidi analyzes MIDI tracks and creates ToneLib tracks
-// For now, only creates drum tracks from Rock Band "PART DRUMS" track
+// Creates drum and pro bass tracks from Rock Band MIDI tracks
 func createTracksFromMidi(midiFile *smf.SMF, numBars int) ToneLibTracks {
 	var tracks []ToneLibTrack
+	var trackID int = 1
 
 	// Find the "PART DRUMS" track specifically
 	var drumTrack smf.Track
@@ -321,7 +328,7 @@ func createTracksFromMidi(midiFile *smf.SMF, numBars int) ToneLibTracks {
 		}
 	}
 
-	// Only create drum track if found
+	// Create drum track if found
 	if drumTrackFound {
 		// Extract Rock Band expert drum notes
 		expertDrumNotes := extractDrumNotes(drumTrack)
@@ -336,17 +343,62 @@ func createTracksFromMidi(midiFile *smf.SMF, numBars int) ToneLibTracks {
 				Solo:     0,
 				Mute:     0,
 				Opt:      0,
-				VolDB:    "0",
+				VolDB:    "-0.1574783325195312",
 				Bank:     128, // Percussion bank
 				Program:  0,   // Standard drum kit
 				Chorus:   0,
 				Reverb:   0,
 				Phaser:   0,
 				Tremolo:  0,
-				ID:       1,
+				ID:       trackID,
 				Offset:   24, // Required for correct pitch playback
 				Strings:  createDrumStrings(),
 				Bars:     createDrumBarsFromNotes(expertDrumNotes, midiFile, numBars),
+			}
+
+			tracks = append(tracks, toneLibTrack)
+			trackID++
+		}
+	}
+
+	// Find pro bass tracks
+	var bassTrackConfig BassTrackInfo
+	var bassTrack smf.Track
+	var bassTrackFound bool
+
+	// Try expert pro bass track first, then fall back to combined track
+	bassTrackConfig, bassTrack, bassTrackFound = findBassTrack(midiFile, "PART REAL_BASS_X")
+	if !bassTrackFound {
+		// Try combined track format
+		bassTrackConfig, bassTrack, bassTrackFound = findBassTrack(midiFile, "PART REAL_BASS")
+	}
+
+	// Create bass track if found
+	if bassTrackFound {
+		// Extract pro bass notes
+		expertBassNotes := extractBassNotes(bassTrack, bassTrackConfig)
+
+		if len(expertBassNotes) > 0 {
+			toneLibTrack := ToneLibTrack{
+				Name:     "Bass",
+				Color:    "ff0000ff", // Blue color for bass
+				Visible:  1,
+				Collapse: 0,
+				Lock:     0,
+				Solo:     0,
+				Mute:     0,
+				Opt:      0,
+				VolDB:    "-0.1574783325195312",
+				Bank:     0,  // Standard bank
+				Program:  33, // Electric Bass (finger)
+				Chorus:   0,
+				Reverb:   0,
+				Phaser:   0,
+				Tremolo:  0,
+				ID:       trackID,
+				Offset:   24, // Required for correct pitch playback
+				Strings:  createBassStrings(),
+				Bars:     createBassBarsFromNotes(expertBassNotes, midiFile, numBars),
 			}
 
 			tracks = append(tracks, toneLibTrack)
@@ -408,32 +460,25 @@ func createDrumStrings() ToneLibStrings {
 	return ToneLibStrings{Strings: strings}
 }
 
-// createDrumBarsFromNotes converts Rock Band drum notes to ToneLib bars
-func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF, numBars int) ToneLibTrackBars {
-	if len(drumNotes) == 0 {
-		// Create empty bars matching BarIndex count
-		emptyBeats := ""
-		bars := make([]ToneLibTrackBar, numBars)
+// createBassStrings creates string definitions for 4-string bass tracks
+// Uses standard bass tuning ordered from high to low: G(43), D(38), A(33), E(28)
+// Following ToneLib convention: String 1 = highest pitch, String 4 = lowest pitch
+func createBassStrings() ToneLibStrings {
+	bassTuning := [4]int{43, 38, 33, 28} // G, D, A, E (high to low)
+	strings := make([]ToneLibString, 4)
 
-		for i := 0; i < numBars; i++ {
-			bar := ToneLibTrackBar{
-				ID:       i + 1,
-				Beats:    []ToneLibBeat{{Duration: 1, Dyn: "mf"}}, // Whole rest
-				BeatsEnd: &emptyBeats,
-			}
-
-			// Add clef and key signature to first bar
-			if i == 0 {
-				bar.Clef = &ToneLibClef{Value: 5} // Percussion clef
-				bar.KeySign = &ToneLibKeySign{Value: 0}
-			}
-
-			bars[i] = bar
+	for i := 0; i < 4; i++ {
+		strings[i] = ToneLibString{
+			ID:     i + 1,
+			Tuning: bassTuning[i],
 		}
-
-		return ToneLibTrackBars{Bars: bars}
 	}
 
+	return ToneLibStrings{Strings: strings}
+}
+
+// createDrumBarsFromNotes converts Rock Band drum notes to ToneLib bars
+func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF, numBars int) ToneLibTrackBars {
 	// Get ticks per quarter note for timing calculations
 	ticksPerQuarter := int(480) // Default
 	if tf, ok := midiFile.TimeFormat.(smf.MetricTicks); ok {
@@ -444,10 +489,8 @@ func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF, numBars in
 	// Each bar = 4 quarter notes = 4 * ticksPerQuarter ticks
 	ticksPerBar := ticksPerQuarter * 4
 
-	// Group notes by bar
+	// Group notes by bar (handles empty drumNotes gracefully)
 	barNotes := make(map[int][]DrumNote)
-
-	// DrumNote.Time is already absolute time in ticks
 	for _, note := range drumNotes {
 		barNum := int(note.Time/uint32(ticksPerBar)) + 1
 		// Only include notes within the expected bar count
@@ -467,13 +510,13 @@ func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF, numBars in
 			BeatsEnd: &emptyBeats, // Required empty closing tag for each bar
 		}
 
-		// Add clef and key signature to first bar
+		// Add clef and key signature to first bar only
 		if barID == 1 {
-			bar.Clef = &ToneLibClef{Value: 5} // Percussion clef
+			bar.Clef = &ToneLibClef{Value: ToneLibPercussionCleff}
 			bar.KeySign = &ToneLibKeySign{Value: 0}
 		}
 
-		// Convert notes in this bar to beats
+		// Convert notes in this bar to beats (or create whole rest if empty)
 		notesInBar := barNotes[barID]
 		if len(notesInBar) > 0 {
 			bar.Beats = convertDrumNotesToBeats(notesInBar, barID, ticksPerQuarter)
@@ -485,9 +528,61 @@ func createDrumBarsFromNotes(drumNotes []DrumNote, midiFile *smf.SMF, numBars in
 		bars = append(bars, bar)
 	}
 
-	return ToneLibTrackBars{
-		Bars: bars,
+	return ToneLibTrackBars{Bars: bars}
+}
+
+// createBassBarsFromNotes converts Rock Band pro bass notes to ToneLib bars
+func createBassBarsFromNotes(bassNotes []BassNote, midiFile *smf.SMF, numBars int) ToneLibTrackBars {
+	// Get ticks per quarter note for timing calculations
+	ticksPerQuarter := int(480) // Default
+	if tf, ok := midiFile.TimeFormat.(smf.MetricTicks); ok {
+		ticksPerQuarter = int(tf)
 	}
+
+	// Simple quantization: group notes into bars of 4/4 time
+	// Each bar = 4 quarter notes = 4 * ticksPerQuarter ticks
+	ticksPerBar := ticksPerQuarter * 4
+
+	// Group notes by bar (handles empty bassNotes gracefully)
+	barNotes := make(map[int][]BassNote)
+	for _, note := range bassNotes {
+		barNum := int(note.Time/uint32(ticksPerBar)) + 1
+		// Only include notes within the expected bar count
+		if barNum <= numBars {
+			barNotes[barNum] = append(barNotes[barNum], note)
+		}
+	}
+
+	// Create ToneLib bars - exactly numBars to match BarIndex
+	var bars []ToneLibTrackBar
+	emptyBeats := ""
+
+	for barID := 1; barID <= numBars; barID++ {
+		bar := ToneLibTrackBar{
+			ID:       barID,
+			Beats:    []ToneLibBeat{},
+			BeatsEnd: &emptyBeats, // Required empty closing tag for each bar
+		}
+
+		// Add clef and key signature to first bar only
+		if barID == 1 {
+			bar.Clef = &ToneLibClef{Value: ToneLibBassClef}
+			bar.KeySign = &ToneLibKeySign{Value: 0}
+		}
+
+		// Convert notes in this bar to beats (or create whole rest if empty)
+		notesInBar := barNotes[barID]
+		if len(notesInBar) > 0 {
+			bar.Beats = convertBassNotesToBeats(notesInBar, barID, ticksPerQuarter)
+		} else {
+			// Empty bar - whole rest
+			bar.Beats = []ToneLibBeat{{Duration: 1, Dyn: "mf"}}
+		}
+
+		bars = append(bars, bar)
+	}
+
+	return ToneLibTrackBars{Bars: bars}
 }
 
 // convertDrumNotesToBeats converts drum notes in a bar to ToneLib beats
@@ -550,6 +645,91 @@ func convertDrumNotesToBeats(notesInBar []DrumNote, barID int, ticksPerQuarter i
 				if stringID > 6 {
 					stringID = 1 // Wrap around
 				}
+			}
+
+			beats = append(beats, beat)
+		} else {
+			// Create rest beat
+			beats = append(beats, ToneLibBeat{
+				Duration: 8,
+				Dyn:      "mf",
+			})
+		}
+	}
+
+	return beats
+}
+
+// convertBassNotesToBeats converts bass notes in a bar to ToneLib beats
+// This is a simplified quantization - groups notes into eighth note beats
+func convertBassNotesToBeats(notesInBar []BassNote, barID int, ticksPerQuarter int) []ToneLibBeat {
+	if len(notesInBar) == 0 {
+		return []ToneLibBeat{{Duration: 1, Dyn: "mf"}} // Whole rest
+	}
+
+	// Calculate bar start time
+	barStartTime := uint32((barID - 1) * ticksPerQuarter * 4)
+
+	// Quantize to eighth notes (duration = 8 in ToneLib)
+	ticksPerEighth := ticksPerQuarter / 2
+	numEighths := 8 // 8 eighth notes per 4/4 bar
+
+	// Group notes by eighth note position
+	eighthNotes := make(map[int][]BassNote)
+
+	for _, note := range notesInBar {
+		relativeTime := int(note.Time - barStartTime)
+		eighthPos := relativeTime / ticksPerEighth
+		if eighthPos >= numEighths {
+			eighthPos = numEighths - 1 // Clamp to last eighth
+		}
+		eighthNotes[eighthPos] = append(eighthNotes[eighthPos], note)
+	}
+
+	// Create beats
+	var beats []ToneLibBeat
+
+	for eighthPos := 0; eighthPos < numEighths; eighthPos++ {
+		notes := eighthNotes[eighthPos]
+
+		if len(notes) > 0 {
+			// Create beat with notes
+			beat := ToneLibBeat{
+				Duration: 8, // Eighth note
+				Dyn:      "mf",
+				Notes:    []ToneLibNote{},
+			}
+
+			// Convert each pro bass note to ToneLib note
+			for _, bassNote := range notes {
+				// Convert bass note to MIDI note number
+				midiNote, err := bassNote.toMidiNote()
+				if err != nil {
+					continue // Skip invalid notes
+				}
+
+				// Map Rock Band bass strings to ToneLib strings (reverse order)
+				// Rock Band: 0=E(low), 1=A, 2=D, 3=G(high)
+				// ToneLib:   1=G(high), 2=D, 3=A, 4=E(low)
+				// Mapping: Rock Band string N → ToneLib string (4-N)
+				toneLibStringID := 4 - int(bassNote.String)
+
+				// ToneLib bass tuning (high to low): G(43), D(38), A(33), E(28)
+				bassTuning := [4]uint8{43, 38, 33, 28}        // Strings 1,2,3,4
+				stringTuning := bassTuning[toneLibStringID-1] // Convert to 0-indexed
+				fret := int(midiNote) - int(stringTuning)
+
+				// Ensure fret is valid (should be >= 0 due to tuning setup)
+				if fret < 0 {
+					fret = 0
+				}
+
+				toneLibNote := ToneLibNote{
+					Fret:   fret,
+					String: toneLibStringID,
+				}
+
+				beat.Notes = append(beat.Notes, toneLibNote)
 			}
 
 			beats = append(beats, beat)
