@@ -14,18 +14,20 @@ import (
 
 // BeatNote represents a beat event from the BEAT track
 type BeatNote struct {
-	Time       uint32 // Absolute time in ticks
-	IsDownbeat bool   // True if this is a downbeat (C-1), false for other beats (C#-1)
+	Time        uint32  // Absolute time in ticks
+	TimeSeconds float64 // Absolute time in seconds
+	IsDownbeat  bool    // True if this is a downbeat (C-1), false for other beats (C#-1)
 }
 
 // Measure represents a musical measure with timing information
 type Measure struct {
-	StartTime        uint32  // Start time in ticks
-	EndTime          uint32  // End time in ticks
-	BeatsPerMeasure  int     // Number of beats in this measure
-	BeatsPerMinute   float64 // Original BPM from MIDI tempo events
-	PreciseStartTime float64 // High-precision expected start time in ticks
-	PreciseEndTime   float64 // High-precision expected end time in ticks
+	StartTime        uint32     // Start time in ticks
+	EndTime          uint32     // End time in ticks
+	StartTimeSeconds float64    // Start time in seconds
+	EndTimeSeconds   float64    // End time in seconds
+	BeatsPerMeasure  int        // Number of beats in this measure
+	BeatsPerMinute   float64    // Original BPM from MIDI tempo events
+	BeatNotes        []BeatNote // Beat notes contained in this measure
 }
 
 // Timeline represents the complete beat timeline of a song
@@ -54,20 +56,14 @@ func ExtractBeatTimeline(smfData *smf.SMF) (*Timeline, error) {
 		return nil, fmt.Errorf("BEAT track not found")
 	}
 
-	// Extract beat notes from the BEAT track
-	beatNotes, err := extractBeatNotes(beatTrack)
+	// Extract beat notes with accurate timing from all tracks
+	beatNotes, err := extractBeatNotesWithTiming(smfData, beatTrack)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract beat notes: %w", err)
 	}
 
 	if len(beatNotes) == 0 {
 		return nil, fmt.Errorf("no beat notes found in BEAT track")
-	}
-
-	// Extract tempo information from all tracks
-	tempoMap, err := extractTempoMap(smfData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract tempo map: %w", err)
 	}
 
 	// Get ticks per quarter note for BPM calculations
@@ -77,7 +73,7 @@ func ExtractBeatTimeline(smfData *smf.SMF) (*Timeline, error) {
 	}
 
 	// Create measures from beat pattern
-	measures := createMeasuresFromBeats(beatNotes, tempoMap, float64(ticksPerQuarter))
+	measures := createMeasuresFromBeats(beatNotes)
 
 	timeline := &Timeline{
 		Measures:     measures,
@@ -88,106 +84,127 @@ func ExtractBeatTimeline(smfData *smf.SMF) (*Timeline, error) {
 	return timeline, nil
 }
 
-// extractBeatNotes extracts beat events from the BEAT track
-func extractBeatNotes(beatTrack smf.Track) ([]BeatNote, error) {
-	var beatNotes []BeatNote
-	var currentTime uint32
-
-	for _, event := range beatTrack {
-		currentTime += event.Delta
-
-		msg := event.Message
-		var ch, key, vel uint8
-
-		// Check for note on events
-		if msg.GetNoteOn(&ch, &key, &vel) {
-			// noteoff events encoded as note on with velocity 0
-			if vel == 0 {
-				continue
-			}
-
-			var isDownbeat bool
-			switch key {
-			case 12: // C-1 - Downbeat
-				isDownbeat = true
-			case 13: // C#-1 - Other beats
-				isDownbeat = false
-			default:
-				// Skip notes that aren't beat markers
-				fmt.Printf("Invalid note detected at time %d with key %d\n", currentTime, key)
-				continue
-			}
-
-			beatNotes = append(beatNotes, BeatNote{
-				Time:       currentTime,
-				IsDownbeat: isDownbeat,
-			})
-		}
-	}
-
-	// Sort by time to ensure proper order
-	sort.Slice(beatNotes, func(i, j int) bool {
-		return beatNotes[i].Time < beatNotes[j].Time
-	})
-
-	return beatNotes, nil
-}
-
-// TempoEvent represents a tempo change in the MIDI file
-type TempoEvent struct {
-	Time uint32  // Absolute time in ticks
-	BPM  float64 // Beats per minute
-}
-
-// extractTempoMap extracts tempo changes from all tracks in the MIDI file
-func extractTempoMap(smfData *smf.SMF) ([]TempoEvent, error) {
-	var tempoEvents []TempoEvent
-
-	// Verify time format is supported
-	_, ok := smfData.TimeFormat.(smf.MetricTicks)
+// extractBeatNotesWithTiming processes all MIDI events chronologically to extract beats with accurate timing
+func extractBeatNotesWithTiming(smfData *smf.SMF, beatTrack smf.Track) ([]BeatNote, error) {
+	// Get ticks per quarter note
+	ticksPerQuarter, ok := smfData.TimeFormat.(smf.MetricTicks)
 	if !ok {
-		return nil, fmt.Errorf("unsupported time format")
+		return nil, fmt.Errorf("unsupported time format, expected MetricTicks")
 	}
 
-	// Search all tracks for tempo events
+	// Create a unified event stream with all events from all tracks
+	type TimedEvent struct {
+		Time    uint32
+		Message smf.Message
+		IsBeat  bool
+		Key     uint8
+	}
+
+	var allEvents []TimedEvent
+
+	// Process all tracks to collect tempo events and beat events
 	for _, track := range smfData.Tracks {
 		var currentTime uint32
+		trackName := getTrackName(track)
+		isBeatTrack := (trackName == "BEAT")
 
 		for _, event := range track {
 			currentTime += event.Delta
 
-			msg := event.Message
+			// Add tempo events from any track
 			var bpm float64
-
-			// Check for tempo meta events
-			if msg.GetMetaTempo(&bpm) {
-
-				tempoEvents = append(tempoEvents, TempoEvent{
-					Time: currentTime,
-					BPM:  bpm,
+			if event.Message.GetMetaTempo(&bpm) {
+				allEvents = append(allEvents, TimedEvent{
+					Time:    currentTime,
+					Message: event.Message,
+					IsBeat:  false,
 				})
+			}
+
+			// Add beat events only from BEAT track
+			if isBeatTrack {
+				var ch, key, vel uint8
+				if event.Message.GetNoteOn(&ch, &key, &vel) && vel > 0 {
+					if key == 12 || key == 13 { // C-1 or C#-1
+						allEvents = append(allEvents, TimedEvent{
+							Time:    currentTime,
+							Message: event.Message,
+							IsBeat:  true,
+							Key:     key,
+						})
+					} else {
+						// Warning for unexpected notes in beat track
+						fmt.Printf("Warning: Unexpected note detected in BEAT track at time %d with key %d\n", currentTime, key)
+					}
+				}
 			}
 		}
 	}
 
-	// Sort by time
-	sort.Slice(tempoEvents, func(i, j int) bool {
-		return tempoEvents[i].Time < tempoEvents[j].Time
+	// Sort all events by time
+	sort.Slice(allEvents, func(i, j int) bool {
+		return allEvents[i].Time < allEvents[j].Time
 	})
 
-	// If no tempo events found, assume 120 BPM
-	if len(tempoEvents) == 0 {
-		tempoEvents = append(tempoEvents, TempoEvent{
-			Time: 0,
-			BPM:  120.0,
-		})
+	// Process events chronologically to build beat notes with accurate timing
+	var beatNotes []BeatNote
+	var currentSeconds float64 = 0.0
+	var lastTick uint32 = 0
+	var currentBPM float64 = 120.0 // Default BPM
+	var hasTempoEvents bool = false
+	var usedDefaultTempo bool = false
+
+	for _, event := range allEvents {
+		// Calculate time elapsed since last event
+		ticksElapsed := event.Time - lastTick
+		if ticksElapsed > 0 {
+			// Check if we're using default tempo
+			if !hasTempoEvents && currentBPM == 120.0 {
+				usedDefaultTempo = true
+			}
+			// Convert ticks to seconds using current BPM
+			ticksPerSecond := float64(ticksPerQuarter) * currentBPM / 60.0
+			secondsElapsed := float64(ticksElapsed) / ticksPerSecond
+			currentSeconds += secondsElapsed
+		}
+
+		// Update BPM if this is a tempo event
+		var bpm float64
+		if event.Message.GetMetaTempo(&bpm) {
+			currentBPM = bpm
+			hasTempoEvents = true
+		}
+
+		// Record beat event if this is a beat
+		if event.IsBeat {
+			var isDownbeat bool
+			switch event.Key {
+			case 12: // C-1 - Downbeat
+				isDownbeat = true
+			case 13: // C#-1 - Other beats
+				isDownbeat = false
+			}
+
+			beatNotes = append(beatNotes, BeatNote{
+				Time:        event.Time,
+				TimeSeconds: currentSeconds,
+				IsDownbeat:  isDownbeat,
+			})
+		}
+
+		lastTick = event.Time
 	}
 
-	return tempoEvents, nil
+	// Warn if we used default tempo
+	if usedDefaultTempo {
+		fmt.Printf("Warning: No tempo events found, using default 120 BPM for timing calculations\n")
+	}
+
+	return beatNotes, nil
 }
 
-// createMeasuresFromBeats creates measure objects from beat pattern and tempo information
-func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksPerQuarter float64) []Measure {
+// createMeasuresFromBeats creates measure objects from beat pattern
+func createMeasuresFromBeats(beatNotes []BeatNote) []Measure {
 	var measures []Measure
 
 	if len(beatNotes) == 0 {
@@ -211,59 +228,57 @@ func createMeasuresFromBeats(beatNotes []BeatNote, tempoMap []TempoEvent, ticksP
 			endIdx = len(beatNotes)
 		}
 
-		// Count beats in this measure
-		beatsInMeasure := endIdx - startIdx
+		// Extract beats for this measure
+		measureBeats := beatNotes[startIdx:endIdx]
+		beatsInMeasure := len(measureBeats)
 
-		startTime := beatNotes[startIdx].Time
+		// Get timing from first and last beat
+		startTime := measureBeats[0].Time
+		startTimeSeconds := measureBeats[0].TimeSeconds
+
 		var endTime uint32
+		var endTimeSeconds float64
 		if endIdx < len(beatNotes) {
+			// Use the start of the next measure as our end time
 			endTime = beatNotes[endIdx].Time
+			endTimeSeconds = beatNotes[endIdx].TimeSeconds
 		} else {
-			// For the last measure, estimate end time
+			// For the last measure, estimate end time based on last beat
+			lastBeat := measureBeats[len(measureBeats)-1]
 			if beatsInMeasure > 1 {
-				beatDuration := beatNotes[endIdx-1].Time - startTime
-				averageBeatLength := float64(beatDuration) / float64(beatsInMeasure-1)
-				endTime = startTime + uint32(float64(beatsInMeasure)*averageBeatLength)
+				// Calculate average beat duration and project forward
+				measureDuration := lastBeat.TimeSeconds - startTimeSeconds
+				averageBeatDuration := measureDuration / float64(beatsInMeasure-1)
+				endTimeSeconds = lastBeat.TimeSeconds + averageBeatDuration
+
+				ticksDuration := lastBeat.Time - startTime
+				averageTicksPerBeat := float64(ticksDuration) / float64(beatsInMeasure-1)
+				endTime = lastBeat.Time + uint32(averageTicksPerBeat)
 			} else {
-				endTime = startTime + uint32(ticksPerQuarter) // Assume quarter note
+				// Single beat measure - add a reasonable duration
+				endTimeSeconds = lastBeat.TimeSeconds + 1.0 // 1 second default
+				endTime = lastBeat.Time + 480               // Assume 480 ticks (quarter note at common resolution)
 			}
 		}
 
-		// Find the appropriate tempo for this measure
-		bpm := findBPMAtTime(startTime, tempoMap)
+		// Calculate BPM from measure duration
+		measureDurationSeconds := endTimeSeconds - startTimeSeconds
+		bpm := float64(beatsInMeasure) * 60.0 / measureDurationSeconds
 
 		measure := Measure{
-			StartTime:       startTime,
-			EndTime:         endTime,
-			BeatsPerMeasure: beatsInMeasure,
-			BeatsPerMinute:  bpm,
-			// Precise timing fields will be calculated later
-			PreciseStartTime: 0,
-			PreciseEndTime:   0,
+			StartTime:        startTime,
+			EndTime:          endTime,
+			StartTimeSeconds: startTimeSeconds,
+			EndTimeSeconds:   endTimeSeconds,
+			BeatsPerMeasure:  beatsInMeasure,
+			BeatsPerMinute:   bpm,
+			BeatNotes:        measureBeats,
 		}
 
 		measures = append(measures, measure)
 	}
 
-	// Calculate precise timing
-	measures = calculatePreciseMeasureTiming(measures, tempoMap, ticksPerQuarter)
-
 	return measures
-}
-
-// findBPMAtTime finds the BPM that applies at a given time
-func findBPMAtTime(time uint32, tempoMap []TempoEvent) float64 {
-	bpm := 120.0 // Default BPM
-
-	for _, tempo := range tempoMap {
-		if tempo.Time <= time {
-			bpm = tempo.BPM
-		} else {
-			break
-		}
-	}
-
-	return bpm
 }
 
 // GetMeasureAtTime finds the measure that contains the given time
@@ -288,74 +303,25 @@ func (t *Timeline) GetTotalDuration() uint32 {
 func (t *Timeline) String() string {
 	result := fmt.Sprintf("Timeline: %d measures, %d beat notes\n", len(t.Measures), len(t.BeatNotes))
 
-	var elapsedSeconds float64 = 0.0
-
 	for i, measure := range t.Measures {
-		result += fmt.Sprintf("Measure %d: %d/%d time, %.1f BPM, ticks %d-%d\n",
+		result += fmt.Sprintf("Measure %d: %d/%d time, %.1f BPM, ticks %d-%d, %.3fs-%.3fs\n",
 			i+1,
 			measure.BeatsPerMeasure,
 			4, // Assuming quarter note gets the beat for simplicity
 			measure.BeatsPerMinute,
 			measure.StartTime,
 			measure.EndTime,
+			measure.StartTimeSeconds,
+			measure.EndTimeSeconds,
 		)
 
-		// Find beats within this measure
-		measureBeatIndex := 1
-		for _, beat := range t.BeatNotes {
-			if beat.Time >= measure.StartTime && beat.Time < measure.EndTime {
-				// Calculate time offset from measure start
-				ticksFromMeasureStart := beat.Time - measure.StartTime
-				// Convert ticks to seconds using measure's BPM
-				ticksPerSecond := t.TicksPerBeat * measure.BeatsPerMinute / 60.0
-				secondsFromMeasureStart := float64(ticksFromMeasureStart) / ticksPerSecond
-				beatTimeSeconds := elapsedSeconds + secondsFromMeasureStart
-
-				result += fmt.Sprintf("  * Beat %d: %.6f\n", measureBeatIndex, beatTimeSeconds)
-				measureBeatIndex++
-			}
+		// Print beats from this measure's BeatNotes
+		for j, beat := range measure.BeatNotes {
+			result += fmt.Sprintf("  * Beat %d: %.6f\n", j+1, beat.TimeSeconds)
 		}
-
-		// Add measure duration to elapsed time
-		measureDurationTicks := measure.EndTime - measure.StartTime
-		ticksPerSecond := t.TicksPerBeat * measure.BeatsPerMinute / 60.0
-		measureDurationSeconds := float64(measureDurationTicks) / ticksPerSecond
-		elapsedSeconds += measureDurationSeconds
 	}
 
 	return result
-}
-
-// calculatePreciseMeasureTiming calculates high-precision measure start/end times
-// based on MIDI tempo events and beat pattern
-func calculatePreciseMeasureTiming(measures []Measure, tempoMap []TempoEvent, ticksPerQuarter float64) []Measure {
-	if len(measures) == 0 {
-		return measures
-	}
-
-	// Create a copy of measures to modify
-	preciseMeasures := make([]Measure, len(measures))
-	copy(preciseMeasures, measures)
-
-	// Calculate precise timing for each measure
-	var currentPreciseTime float64 = float64(measures[0].StartTime)
-
-	for i := range preciseMeasures {
-		preciseMeasures[i].PreciseStartTime = currentPreciseTime
-
-		// Calculate expected duration of this measure in ticks based on BPM and beat count
-		bpm := findBPMAtTime(uint32(currentPreciseTime), tempoMap)
-		measureDurationInMinutes := float64(preciseMeasures[i].BeatsPerMeasure) / bpm
-		measureDurationInTicks := measureDurationInMinutes * 60.0 * ticksPerQuarter * bpm / 60.0 // Simplifies to: measureDurationInMinutes * ticksPerQuarter * bpm
-
-		// More precise calculation: duration = (beats_per_measure / bpm) * 60 seconds * (ticks_per_quarter * (bpm/60)) ticks per second
-		measureDurationInTicks = float64(preciseMeasures[i].BeatsPerMeasure) * ticksPerQuarter * (60.0 / bpm)
-
-		currentPreciseTime += measureDurationInTicks
-		preciseMeasures[i].PreciseEndTime = currentPreciseTime
-	}
-
-	return preciseMeasures
 }
 
 // ExtractAudioBeats uses aubiotrack to detect beats from an audio file
