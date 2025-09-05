@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"math"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -322,6 +323,85 @@ func (t *Timeline) String() string {
 	}
 
 	return result
+}
+
+// QuantizeBPMs takes a timeline with floating-point BPMs and returns a new timeline
+// with integer BPMs selected to minimize cumulative timing drift
+func QuantizeBPMs(timeline *Timeline) *Timeline {
+	if len(timeline.Measures) == 0 {
+		return timeline
+	}
+
+	quantizedTimeline := &Timeline{
+		BeatNotes:    timeline.BeatNotes, // Keep original beat notes unchanged
+		TicksPerBeat: timeline.TicksPerBeat,
+	}
+
+	quantizedMeasures := make([]Measure, len(timeline.Measures))
+	quantizedCurrentTime := 0.0 // Track cumulative time with quantized BPMs
+
+	for i, measure := range timeline.Measures {
+		// Copy the original measure
+		quantizedMeasures[i] = measure
+
+		originalBPM := measure.BeatsPerMinute
+
+		// Search range: try BPMs around the original value
+		searchRange := 2                  // Try ±2 BPM from the rounded value
+		baseBPM := int(originalBPM + 0.5) // Start with simple rounding
+
+		bestBPM := -1
+		bestDrift := math.Inf(1)
+
+		// Search for better BPM values
+		for testBPM := baseBPM - searchRange; testBPM <= baseBPM+searchRange; testBPM++ {
+			if testBPM < 1 { // Ensure BPM is positive
+				continue
+			}
+
+			drift := calculateDrift(testBPM, quantizedCurrentTime, measure)
+
+			if drift < bestDrift {
+				bestDrift = drift
+				bestBPM = testBPM
+			}
+		}
+
+		if bestBPM == -1 {
+			panic("Failed to calculate best fit bpm")
+		}
+
+		// Update the measure with quantized BPM
+		quantizedMeasures[i].BeatsPerMinute = float64(bestBPM)
+
+		quantizedMeasureDuration := float64(measure.BeatsPerMeasure) * 60.0 / float64(bestBPM)
+
+		// Update timing information for quantized timeline
+		quantizedMeasures[i].StartTimeSeconds = quantizedCurrentTime
+		quantizedMeasures[i].EndTimeSeconds = quantizedCurrentTime + quantizedMeasureDuration
+
+		// Update quantized current time for next iteration
+		quantizedCurrentTime += quantizedMeasureDuration
+	}
+
+	quantizedTimeline.Measures = quantizedMeasures
+	return quantizedTimeline
+}
+
+// calculateDrift returns the absolute difference of end time when using a particular BPM for a measure
+func calculateDrift(bpm int, currentTime float64, targetMeasure Measure) float64 {
+	duration := float64(targetMeasure.BeatsPerMeasure) * 60.0 / float64(bpm)
+	endTime := currentTime + duration
+
+	return abs(targetMeasure.EndTimeSeconds - endTime)
+}
+
+// abs returns the absolute value of a float64
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // ExtractAudioBeats uses aubiotrack to detect beats from an audio file

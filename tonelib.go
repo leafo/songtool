@@ -270,17 +270,20 @@ func createBarIndexFromTimeline(timeline *Timeline) ToneLibBarIndex {
 		}
 	}
 
-	bars := make([]ToneLibBar, len(timeline.Measures))
+	// Quantize BPMs to minimize cumulative drift
+	quantizedTimeline := QuantizeBPMs(timeline)
+
+	bars := make([]ToneLibBar, len(quantizedTimeline.Measures))
 	var lastTempo int
 
-	for i, measure := range timeline.Measures {
+	for i, measure := range quantizedTimeline.Measures {
 		bar := ToneLibBar{
 			ID:     i + 1,
 			JamSet: 0,
 		}
 
-		// Set tempo using BPM from MIDI tempo events, rounded to nearest integer for ToneLib format
-		currentTempo := int(measure.BeatsPerMinute + 0.5) // Round to nearest integer
+		// BPM is now already an integer from quantization process
+		currentTempo := int(measure.BeatsPerMinute)
 		if i == 0 || currentTempo != lastTempo {
 			bar.Tempo = currentTempo
 			lastTempo = currentTempo
