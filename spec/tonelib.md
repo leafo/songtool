@@ -247,11 +247,30 @@ The `<Bars>` element within a `<Track>` contains the musical information for tha
   - `duration`: The duration of the beat. This is a denominator value (e.g., `4` for a quarter note, `8` for an eighth note, `16` for a sixteenth note). The sum of the durations of all `<Beat>` elements in a bar should equal the time signature
   - `dyn`: Dynamics (mf=mezzo-forte)
   - `dotted`: Optional attribute for dotted rhythms (dotted="1")
+  - `n` and `t`: Optional attributes for tuplets (e.g., `n="3" t="2"` for triplets - 3 notes in the time of 2)
   - **Important**: Empty beats (rests) can be created with just `<Beat duration="N" dyn="mf"/>` without any child elements
 - `<Note>`: Fret and string positions with optional effects
 - `<Text>`: Lyrics or annotations (placed within the same `<Beat>` as the associated `<Note>`)
 - `<Effects>`: Special note effects including grace notes and ghost notes
 - `<Beats/>`: Required closing tag at the end of each `<Bar>`
+
+#### Note and Rest Duration Encoding
+
+ToneLib uses a denominator-based system for encoding note and rest durations within the `duration` attribute of `<Beat>` elements. The system is based on subdivisions of a whole note:
+
+**Standard Note Duration Values:**
+- `duration="1"` - Whole note (takes up entire 4/4 measure)
+- `duration="2"` - Half note (2 per 4/4 measure)
+- `duration="4"` - Quarter note (4 per 4/4 measure)
+- `duration="8"` - Eighth note (8 per 4/4 measure)
+- `duration="16"` - Sixteenth note (16 per 4/4 measure)
+- `duration="32"` - Thirty-second note (32 per 4/4 measure)
+
+**Rest Encoding:**
+Rests are created by using `<Beat>` elements with the desired duration but without any child `<Note>` elements.
+
+**Tuplet Encoding:**
+Triplets and other irregular groupings use additional attributes `n` (numerator) and `t` (time). For example, eighth note triplets use `n="3" t="2"` (3 notes in the time of 2).
 
 ### 3. Audio Files (audio/*.snd)
 - **Format**: Ogg Vorbis
