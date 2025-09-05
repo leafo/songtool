@@ -47,7 +47,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 const (
@@ -72,6 +76,20 @@ type SngFileEntry struct {
 	Filename string // Name of the file
 	Size     uint64 // Size of the file data in bytes
 	Offset   uint64 // Absolute offset to the file data within the SNG file
+}
+
+// MergedAudio represents a temporary merged audio file with cleanup capabilities
+type MergedAudio struct {
+	FilePath string       // Path to the temporary merged audio file
+	cleanup  func() error // Cleanup function to remove temp files
+}
+
+// Close removes temporary files and cleans up resources
+func (ma *MergedAudio) Close() error {
+	if ma.cleanup != nil {
+		return ma.cleanup()
+	}
+	return nil
 }
 
 // SngFile represents an opened SNG file with its header, metadata, file index, and reader
@@ -312,4 +330,107 @@ func (s *SngFile) GetMetadata() SngMetadata {
 		result[k] = v
 	}
 	return result
+}
+
+// GetMergedAudio processes all opus files in the SNG and returns a merged audio file.
+// Returns error if no opus files found or if merge fails - no fallback.
+func (s *SngFile) GetMergedAudio() (*MergedAudio, error) {
+	// Find all opus files in the SNG
+	var opusFiles []string
+	files := s.ListFiles()
+	for _, filename := range files {
+		if strings.HasSuffix(filename, ".opus") {
+			opusFiles = append(opusFiles, filename)
+		}
+	}
+
+	if len(opusFiles) == 0 {
+		return nil, fmt.Errorf("no opus files found in SNG")
+	}
+
+	log.Printf("Found %d opus files to merge: %v", len(opusFiles), opusFiles)
+
+	// Create temporary directory for conversion
+	tempDir, err := os.MkdirTemp("", "sng-audio-merge-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	// Extract all opus files to temp directory
+	var inputPaths []string
+	for i, filename := range opusFiles {
+		audioData, err := s.ReadFile(filename)
+		if err != nil {
+			os.RemoveAll(tempDir)
+			return nil, fmt.Errorf("failed to read %s: %w", filename, err)
+		}
+
+		inputPath := filepath.Join(tempDir, fmt.Sprintf("input_%d.opus", i))
+		if err := os.WriteFile(inputPath, audioData, 0644); err != nil {
+			os.RemoveAll(tempDir)
+			return nil, fmt.Errorf("failed to write temp file for %s: %w", filename, err)
+		}
+		inputPaths = append(inputPaths, inputPath)
+	}
+
+	// Create output path
+	outputPath := filepath.Join(tempDir, "output.ogg")
+
+	// Build ffmpeg command to merge all audio files
+	args := []string{}
+
+	// Add all input files
+	for _, inputPath := range inputPaths {
+		args = append(args, "-i", inputPath)
+	}
+
+	// Build the amerge filter complex string
+	if len(inputPaths) > 1 {
+		// Create filter complex for merging multiple inputs
+		filterInputs := ""
+		for i := range inputPaths {
+			filterInputs += fmt.Sprintf("[%d:a]", i)
+		}
+		filterComplex := fmt.Sprintf("%samerge=inputs=%d[aout]", filterInputs, len(inputPaths))
+
+		args = append(args,
+			"-filter_complex", filterComplex,
+			"-map", "[aout]",
+		)
+	} else {
+		// Single file, just map it directly
+		args = append(args, "-map", "0:a")
+	}
+
+	// Add output parameters
+	args = append(args,
+		"-ac", "2", // Stereo (2 channels)
+		"-ar", "44100", // 44100 Hz sample rate
+		"-c:a", "libvorbis", // Use Vorbis codec
+		"-b:a", "128k", // ~128000 bps bitrate
+		"-y", // Overwrite output file
+		outputPath,
+	)
+
+	// Run ffmpeg to merge and convert
+	log.Printf("Running ffmpeg to merge %d audio files", len(inputPaths))
+	cmd := exec.Command("ffmpeg", args...)
+
+	// Capture any error output
+	if err := cmd.Run(); err != nil {
+		os.RemoveAll(tempDir)
+		return nil, fmt.Errorf("ffmpeg merge failed: %w", err)
+	}
+
+	log.Printf("Audio merge completed successfully")
+
+	// Return MergedAudio with cleanup function
+	mergedAudio := &MergedAudio{
+		FilePath: outputPath,
+		cleanup: func() error {
+			return os.RemoveAll(tempDir)
+		},
+	}
+
+	return mergedAudio, nil
 }
