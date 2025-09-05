@@ -224,10 +224,10 @@ func (b ToneLibBackingBars) MarshalXML(e *xml.Encoder, start xml.StartElement) e
 	return e.EncodeToken(xml.EndElement{Name: start.Name})
 }
 
-// ConvertToToneLib converts a MIDI file to ToneLib the_song.dat XML format
-func ConvertToToneLib(midiFile *smf.SMF, sngFile *SngFile, outputPath string, beatMap *BeatMap) error {
+// WriteToneLibXMLTo writes a MIDI file as ToneLib the_song.dat XML format to the writer
+func WriteToneLibXMLTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) error {
 	score := createToneLibScore(midiFile, sngFile, beatMap)
-	return writeScoreXML(score, os.Stdout)
+	return writeScoreXML(score, writer)
 }
 
 // createDefaultBarIndex creates a simple bar structure with default 120 BPM tempo
@@ -668,16 +668,9 @@ func createZipEntryWithCurrentTime(w *zip.Writer, name string) (io.Writer, error
 	return w.CreateHeader(header)
 }
 
-// CreateToneLibSongFile creates a complete ToneLib .song ZIP archive
-func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath string, useAubio bool) error {
-	// Create the output ZIP file
-	zipFile, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer zipFile.Close()
-
-	zipWriter := zip.NewWriter(zipFile)
+// WriteToneLibSongTo writes a complete ToneLib .song ZIP archive to the writer
+func WriteToneLibSongTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile, useAubio bool) error {
+	zipWriter := zip.NewWriter(writer)
 	defer zipWriter.Close()
 
 	// 1. Create version.info (4 bytes: "3.1\0")

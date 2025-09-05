@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -426,11 +427,46 @@ func printSngFile(sngFile *SngFile, jsonOutput bool) {
 
 // exportToToneLib exports MIDI/SNG data to ToneLib the_song.dat XML format
 func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string, useAubio bool) {
-	// For XML export, aubio is not supported since there's no audio file output
+	var beatMap *BeatMap
+
+	// Extract beats using aubiotrack if requested and SNG file has audio
 	if useAubio {
-		log.Printf("Warning: --aubio flag is not supported for XML export, use --export-tonelib-song instead")
+		if sngFile != nil {
+			mergedAudio, err := sngFile.GetMergedAudio()
+			if err != nil {
+				log.Printf("Warning: failed to merge audio files: %v", err)
+			} else {
+				defer mergedAudio.Close()
+				log.Printf("Running aubiotrack on merged audio file...")
+				// Extract beats from audio
+				beatTimes, err := ExtractAudioBeats(mergedAudio.FilePath)
+				if err != nil {
+					log.Printf("Warning: aubiotrack failed: %v", err)
+				} else {
+					// Convert beat times to BeatMap format
+					beatMap = convertBeatsTimesToBeatMap(beatTimes)
+				}
+			}
+		} else {
+			log.Printf("Warning: --aubio flag requires an SNG file with audio data")
+		}
 	}
-	err := ConvertToToneLib(midiFile, sngFile, "", nil)
+
+	var writer io.Writer
+	outputFile := flag.Arg(1)
+	if outputFile != "" {
+		file, err := os.Create(outputFile)
+		if err != nil {
+			log.Printf("Error creating output file: %v\n", err)
+			return
+		}
+		defer file.Close()
+		writer = file
+	} else {
+		writer = os.Stdout
+	}
+
+	err := WriteToneLibXMLTo(writer, midiFile, sngFile, beatMap)
 	if err != nil {
 		log.Printf("Error exporting to ToneLib: %v\n", err)
 		return
@@ -441,7 +477,14 @@ func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string, useAu
 func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile string, useAubio bool) {
 	fmt.Printf("Creating ToneLib song file: %s\n", outputFile)
 
-	err := CreateToneLibSongFile(midiFile, sngFile, outputFile, useAubio)
+	file, err := os.Create(outputFile)
+	if err != nil {
+		log.Printf("Error creating output file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	err = WriteToneLibSongTo(file, midiFile, sngFile, useAubio)
 	if err != nil {
 		log.Printf("Error creating ToneLib song file: %v\n", err)
 		return
