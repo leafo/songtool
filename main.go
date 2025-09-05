@@ -24,6 +24,7 @@ func main() {
 	exportToneLib := flag.Bool("export-tonelib-xml", false, "Export to ToneLib the_song.dat XML format")
 	createToneLibSong := flag.Bool("export-tonelib-song", false, "Create complete ToneLib .song file (ZIP archive)")
 	filterTrack := flag.String("filter-track", "", "Filter to show only tracks whose name contains this string (case-insensitive)")
+	extractFile := flag.String("extract-file", "", "Extract and print contents of specified file from SNG package to stdout")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -179,6 +180,12 @@ func main() {
 			outputFile = "output.song"
 		}
 		createToneLibSongFile(midiFile, sngFile, outputFile)
+	} else if *extractFile != "" {
+		if sngFile == nil {
+			log.Printf("File extraction only supported for SNG files\n")
+			os.Exit(1)
+		}
+		extractFileFromSng(sngFile, *extractFile)
 	} else {
 		if sngFile != nil {
 			printSngFile(sngFile, *jsonOutput)
@@ -480,3 +487,40 @@ func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile strin
 
 	fmt.Printf("Successfully created ToneLib song file: %s\n", outputFile)
 }
+
+// extractFileFromSng extracts and prints the contents of a file from an SNG package
+func extractFileFromSng(sngFile *SngFile, filename string) {
+	data, err := sngFile.ReadFile(filename)
+	if err != nil {
+		log.Printf("Error reading file '%s' from SNG package: %v\n", filename, err)
+		os.Exit(1)
+	}
+
+	// Check if output file is specified as second argument
+	outputFile := flag.Arg(1)
+	if outputFile != "" {
+		// Write to specified output file
+		file, err := os.Create(outputFile)
+		if err != nil {
+			log.Printf("Error creating output file: %v\n", err)
+			os.Exit(1)
+		}
+		defer file.Close()
+
+		_, err = file.Write(data)
+		if err != nil {
+			log.Printf("Error writing to output file: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Extracted '%s' to: %s\n", filename, outputFile)
+	} else {
+		// Write to stdout
+		_, err = os.Stdout.Write(data)
+		if err != nil {
+			log.Printf("Error writing to stdout: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+

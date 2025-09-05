@@ -61,6 +61,8 @@ Usage: ./songtool [flags] <file> [output]
     	Create complete ToneLib .song file (ZIP archive)
   -export-tonelib-xml
     	Export to ToneLib the_song.dat XML format
+  -extract-file string
+    	Extract and print contents of specified file from SNG package to stdout
   -filter-track string
     	Filter to show only tracks whose name contains this string (case-insensitive)
   -json
