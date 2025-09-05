@@ -49,8 +49,6 @@ go mod tidy         # Clean up dependencies
 
 ```
 Usage: ./songtool [flags] <file> [output]
-  -aubio
-    	Use aubiotrack to detect beats from audio for ToneLib export
   -export-gm
     	Export drums, vocals, and bass to single General MIDI file
   -export-gm-bass

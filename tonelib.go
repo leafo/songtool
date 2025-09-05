@@ -12,7 +12,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -828,7 +827,7 @@ func createZipEntryWithCurrentTime(w *zip.Writer, name string) (io.Writer, error
 }
 
 // Generate and write a complete ToneLib .song ZIP archive to the writer
-func WriteToneLibSongTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile, useAubio bool) error {
+func WriteToneLibSongTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile) error {
 	zipWriter := zip.NewWriter(writer)
 	defer zipWriter.Close()
 
@@ -846,8 +845,9 @@ func WriteToneLibSongTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile, u
 		defer audioResult.MergedAudio.Close()
 	}
 
-	// 3. Extract beats if requested
-	beatMap := extractBeatsFromAudio(audioResult, useAubio)
+	// 3. Generate beats from timeline
+	timeline, _ := ExtractBeatTimeline(midiFile)
+	beatMap := generateBeatsFromTimeline(timeline)
 
 	// 4. Create and write the_song.dat XML
 	if err := writeToneLibXMLToZip(zipWriter, midiFile, sngFile, beatMap, audioResult); err != nil {
@@ -916,20 +916,27 @@ func processAudioForZip(zipWriter *zip.Writer, sngFile *SngFile) (*AudioProcessi
 	}, nil
 }
 
-// extractBeatsFromAudio extracts beats using aubiotrack if requested and audio is available
-func extractBeatsFromAudio(audioResult *AudioProcessingResult, useAubio bool) *BeatMap {
-	if !useAubio || audioResult == nil {
+// generateBeatsFromTimeline generates beats from timeline data instead of audio analysis
+func generateBeatsFromTimeline(timeline *Timeline) *BeatMap {
+	if timeline == nil || len(timeline.BeatNotes) == 0 {
 		return nil
 	}
 
-	log.Printf("Running aubiotrack on merged audio file...")
-	beatTimes, err := ExtractAudioBeats(audioResult.MergedAudio.FilePath)
-	if err != nil {
-		log.Printf("Warning: aubiotrack failed: %v", err)
-		return nil
+	beats := make([]ToneLibBackingBeat, len(timeline.BeatNotes))
+
+	for i, beatNote := range timeline.BeatNotes {
+		beats[i] = ToneLibBackingBeat{
+			N: i,
+			T: fmt.Sprintf("%.15f", beatNote.TimeSeconds), // High precision for timing
+		}
 	}
 
-	return convertBeatsTimesToBeatMap(beatTimes)
+	log.Printf("Generated %d beats from timeline data", len(beats))
+	return &BeatMap{
+		Beats:    beats,
+		TotalNum: fmt.Sprintf("%d", len(beats)),
+		NST:      "0", // Unknown meaning, leave blank
+	}
 }
 
 // writeToneLibXMLToZip creates and writes the_song.dat XML file to the ZIP
@@ -1016,7 +1023,7 @@ func createBackingTrackIfNeeded(sngFile *SngFile, beatMap *BeatMap) *ToneLibBack
 	// Create bars structure with beat map data if available
 	bars := ToneLibBackingBars{
 		Num:   "0",
-		NST:   "",
+		NST:   "0",
 		Beats: []ToneLibBackingBeat{},
 	}
 
@@ -1044,24 +1051,6 @@ func createBackingTrackIfNeeded(sngFile *SngFile, beatMap *BeatMap) *ToneLibBack
 			ChannelMode: 0,
 			Bars:        bars,
 		},
-	}
-}
-
-// convertBeatsTimesToBeatMap converts raw beat timestamps to ToneLib BeatMap format
-func convertBeatsTimesToBeatMap(beatTimes []float64) *BeatMap {
-	beats := make([]ToneLibBackingBeat, len(beatTimes))
-
-	for i, beatTime := range beatTimes {
-		beats[i] = ToneLibBackingBeat{
-			N: i,
-			T: fmt.Sprintf("%.15f", beatTime), // High precision for timing
-		}
-	}
-
-	return &BeatMap{
-		Beats:    beats,
-		TotalNum: strconv.Itoa(len(beats)),
-		NST:      "", // Unknown meaning, leave blank
 	}
 }
 

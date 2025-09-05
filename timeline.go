@@ -1,14 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"log"
 	"math"
-	"os/exec"
 	"sort"
-	"strconv"
-	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
 )
@@ -402,42 +397,4 @@ func abs(x float64) float64 {
 		return -x
 	}
 	return x
-}
-
-// ExtractAudioBeats uses aubiotrack to detect beats from an audio file
-// Returns a slice of beat timestamps in seconds
-func ExtractAudioBeats(audioFilePath string) ([]float64, error) {
-	// Run aubiotrack on the audio file
-	cmd := exec.Command("aubiotrack", audioFilePath)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("aubiotrack failed: %w", err)
-	}
-
-	// Parse aubiotrack output (format: one beat time per line in seconds)
-	var beats []float64
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		// Parse the beat time (in seconds)
-		beatTime, err := strconv.ParseFloat(line, 64)
-		if err != nil {
-			log.Printf("Warning: failed to parse beat time '%s': %v", line, err)
-			continue
-		}
-
-		beats = append(beats, beatTime)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading aubiotrack output: %w", err)
-	}
-
-	log.Printf("Extracted %d beats from aubiotrack", len(beats))
-	return beats, nil
 }

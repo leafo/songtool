@@ -24,7 +24,6 @@ func main() {
 	exportToneLib := flag.Bool("export-tonelib-xml", false, "Export to ToneLib the_song.dat XML format")
 	createToneLibSong := flag.Bool("export-tonelib-song", false, "Create complete ToneLib .song file (ZIP archive)")
 	filterTrack := flag.String("filter-track", "", "Filter to show only tracks whose name contains this string (case-insensitive)")
-	useAubio := flag.Bool("aubio", false, "Use aubiotrack to detect beats from audio for ToneLib export")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -173,13 +172,13 @@ func main() {
 		}
 		printTimeline(midiFile, filename)
 	} else if *exportToneLib {
-		exportToToneLib(midiFile, sngFile, filename, *useAubio)
+		exportToToneLib(midiFile, sngFile, filename)
 	} else if *createToneLibSong {
 		outputFile := flag.Arg(1)
 		if outputFile == "" {
 			outputFile = "output.song"
 		}
-		createToneLibSongFile(midiFile, sngFile, outputFile, *useAubio)
+		createToneLibSongFile(midiFile, sngFile, outputFile)
 	} else {
 		if sngFile != nil {
 			printSngFile(sngFile, *jsonOutput)
@@ -436,31 +435,10 @@ func printSngFile(sngFile *SngFile, jsonOutput bool) {
 }
 
 // exportToToneLib exports MIDI/SNG data to ToneLib the_song.dat XML format
-func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string, useAubio bool) {
-	var beatMap *BeatMap
-
-	// Extract beats using aubiotrack if requested and SNG file has audio
-	if useAubio {
-		if sngFile != nil {
-			mergedAudio, err := sngFile.GetMergedAudio()
-			if err != nil {
-				log.Printf("Warning: failed to merge audio files: %v", err)
-			} else {
-				defer mergedAudio.Close()
-				log.Printf("Running aubiotrack on merged audio file...")
-				// Extract beats from audio
-				beatTimes, err := ExtractAudioBeats(mergedAudio.FilePath)
-				if err != nil {
-					log.Printf("Warning: aubiotrack failed: %v", err)
-				} else {
-					// Convert beat times to BeatMap format
-					beatMap = convertBeatsTimesToBeatMap(beatTimes)
-				}
-			}
-		} else {
-			log.Printf("Warning: --aubio flag requires an SNG file with audio data")
-		}
-	}
+func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
+	// Generate beat map from timeline data
+	timeline, _ := ExtractBeatTimeline(midiFile)
+	beatMap := generateBeatsFromTimeline(timeline)
 
 	var writer io.Writer
 	outputFile := flag.Arg(1)
@@ -484,7 +462,7 @@ func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string, useAu
 }
 
 // createToneLibSongFile creates a complete ToneLib .song ZIP archive
-func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile string, useAubio bool) {
+func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile string) {
 	fmt.Printf("Creating ToneLib song file: %s\n", outputFile)
 
 	file, err := os.Create(outputFile)
@@ -494,7 +472,7 @@ func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile strin
 	}
 	defer file.Close()
 
-	err = WriteToneLibSongTo(file, midiFile, sngFile, useAubio)
+	err = WriteToneLibSongTo(file, midiFile, sngFile)
 	if err != nil {
 		log.Printf("Error creating ToneLib song file: %v\n", err)
 		return
