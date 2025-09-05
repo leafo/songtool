@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
@@ -9,13 +10,20 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"gitlab.com/gomidi/midi/v2/smf"
 )
+
+// BeatMap holds detected beat information for backing track
+type BeatMap struct {
+	Beats    []ToneLibBackingBeat
+	TotalNum string // Total number of beats detected
+	NST      string // Normalized sample time or similar metric
+}
 
 // ToneLib Score XML structure - represents the complete the_song.dat file
 type ToneLibScore struct {
@@ -173,17 +181,52 @@ type ToneLibBackingTrack struct {
 }
 
 type ToneLibAudio struct {
-	Name        string `xml:"name"`
-	DataFile    string `xml:"data_file"`
-	DataLen     int    `xml:"data_len"`
-	TimeOffset  string `xml:"time_offset"`
-	Gain        string `xml:"gain"`
-	ChannelMode int    `xml:"channel_mode"`
+	Name        string             `xml:"name"`
+	DataFile    string             `xml:"data_file"`
+	DataLen     int                `xml:"data_len"`
+	TimeOffset  string             `xml:"time_offset"`
+	Gain        string             `xml:"gain"`
+	ChannelMode int                `xml:"channel_mode"`
+	Bars        ToneLibBackingBars `xml:"bars"`
+}
+
+// Bars element for backing track
+type ToneLibBackingBars struct {
+	Num   string               `xml:"num,attr"`
+	NST   string               `xml:"nst,attr"`
+	Beats []ToneLibBackingBeat `xml:"-"` // Don't marshal automatically
+}
+
+// Beat element for backing track bars
+type ToneLibBackingBeat struct {
+	N int    `xml:"n,attr"`
+	T string `xml:"t,attr"`
+}
+
+// Custom marshaling to create beat0, beat1, beat2, etc.
+func (b ToneLibBackingBars) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	// Marshal attributes
+	start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "num"}, Value: b.Num})
+	start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "nst"}, Value: b.NST})
+
+	if err := e.EncodeToken(start); err != nil {
+		return err
+	}
+
+	// Marshal each beat with dynamic tag names
+	for i, beat := range b.Beats {
+		beatStart := xml.StartElement{Name: xml.Name{Local: fmt.Sprintf("beat%d", i)}}
+		if err := e.EncodeElement(beat, beatStart); err != nil {
+			return err
+		}
+	}
+
+	return e.EncodeToken(xml.EndElement{Name: start.Name})
 }
 
 // ConvertToToneLib converts a MIDI file to ToneLib the_song.dat XML format
-func ConvertToToneLib(midiFile *smf.SMF, sngFile *SngFile, outputPath string) error {
-	score := createToneLibScore(midiFile, sngFile)
+func ConvertToToneLib(midiFile *smf.SMF, sngFile *SngFile, outputPath string, beatMap *BeatMap) error {
+	score := createToneLibScore(midiFile, sngFile, beatMap)
 	return writeScoreXML(score, os.Stdout)
 }
 
@@ -236,8 +279,8 @@ func createBarIndexFromTimeline(timeline *Timeline) ToneLibBarIndex {
 			JamSet: 0,
 		}
 
-		// Set tempo if it changed
-		currentTempo := int(measure.BeatsPerMinute)
+		// Set tempo using BPM from MIDI tempo events, rounded to nearest integer for ToneLib format
+		currentTempo := int(measure.BeatsPerMinute + 0.5) // Round to nearest integer
 		if i == 0 || currentTempo != lastTempo {
 			bar.Tempo = currentTempo
 			lastTempo = currentTempo
@@ -569,18 +612,49 @@ func estimateBarCount(midiFile *smf.SMF) int {
 
 // printXML outputs the ToneLib score as XML to stdout
 func writeScoreXML(score *ToneLibScore, writer io.Writer) error {
-	writer.Write([]byte(xml.Header))
-	encoder := xml.NewEncoder(writer)
+	// Buffer the XML output for post-processing
+	var buf bytes.Buffer
+
+	buf.Write([]byte(xml.Header))
+	encoder := xml.NewEncoder(&buf)
 	encoder.Indent("", "  ")
 
 	if err := encoder.Encode(score); err != nil {
 		return fmt.Errorf("failed to encode XML: %w", err)
 	}
 
-	_, err := writer.Write([]byte("\n")) // Add final newline
+	buf.Write([]byte("\n")) // Add final newline
+
+	// Apply post-processing transformations
+	xmlString := buf.String()
+
+	// 1. Convert empty tags to self-closing format
+	// Pattern matches: <tagname attributes></tagname> where tagname is repeated
+	emptyTagRegex := regexp.MustCompile(`<(\w+)([^>]*?)></\w+>`)
+	xmlString = emptyTagRegex.ReplaceAllStringFunc(xmlString, func(match string) string {
+		// Extract tag name and attributes more carefully
+		openTagRegex := regexp.MustCompile(`<(\w+)([^>]*?)></\w+>`)
+		matches := openTagRegex.FindStringSubmatch(match)
+		if len(matches) >= 3 {
+			tagName := matches[1]
+			attributes := matches[2]
+			// Verify the closing tag matches the opening tag
+			if strings.Contains(match, "</"+tagName+">") {
+				return "<" + tagName + attributes + "/>"
+			}
+		}
+		return match // Return unchanged if pattern doesn't match properly
+	})
+
+	// 2. Convert Unix line endings (LF) to DOS line endings (CRLF)
+	xmlString = strings.ReplaceAll(xmlString, "\n", "\r\n")
+
+	// Write the transformed XML to the final writer
+	_, err := writer.Write([]byte(xmlString))
 	if err != nil {
-		return fmt.Errorf("failed to write final newline: %w", err)
+		return fmt.Errorf("failed to write transformed XML: %w", err)
 	}
+
 	return nil
 }
 
@@ -595,7 +669,7 @@ func createZipEntryWithCurrentTime(w *zip.Writer, name string) (io.Writer, error
 }
 
 // CreateToneLibSongFile creates a complete ToneLib .song ZIP archive
-func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath string) error {
+func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath string, useAubio bool) error {
 	// Create the output ZIP file
 	zipFile, err := os.Create(outputPath)
 	if err != nil {
@@ -619,62 +693,54 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 	// 2. Convert audio first to get the converted data length and path
 	var convertedAudioLen int
 	var audioFilePath string
-	var audioFilename string
+	var mergedAudio *MergedAudio
 	if sngFile != nil {
 		// Merge all opus files into a single audio file
-		convertedData, mergedFilename, err := mergeOpusFiles(sngFile)
+		mergedAudio, err = sngFile.GetMergedAudio()
 		if err != nil {
-			// If merging fails, fall back to looking for song.opus
-			log.Printf("Failed to merge opus files, falling back to song.opus: %v", err)
+			return fmt.Errorf("failed to merge audio files: %w", err)
+		}
+		defer mergedAudio.Close()
 
-			files := sngFile.ListFiles()
-			for _, filename := range files {
-				if filename == "song.opus" {
-					// Read the audio file from SNG
-					audioData, err := sngFile.ReadFile(filename)
-					if err != nil {
-						return fmt.Errorf("failed to read audio file: %w", err)
-					}
+		// Read the converted audio data
+		convertedData, err := os.ReadFile(mergedAudio.FilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read merged audio: %w", err)
+		}
+		convertedAudioLen = len(convertedData)
 
-					// Convert to Ogg Vorbis format using ffmpeg
-					convertedData, err = convertToOggVorbis(audioData, filename)
-					if err != nil {
-						return fmt.Errorf("failed to convert audio to Ogg Vorbis: %w", err)
-					}
-					audioFilename = filename
-					break
-				}
-			}
+		// Create hash for filename
+		audioFilename := "merged_audio.opus"
+		hash := sha256.Sum256([]byte(audioFilename))
+		audioHash := hex.EncodeToString(hash[:])[:16]
+		audioFilePath = fmt.Sprintf("audio/%s.snd", audioHash)
 
-			if convertedData == nil {
-				log.Printf("Warning: No audio files found in SNG")
-			}
-		} else {
-			audioFilename = mergedFilename
+		// Write converted audio to ZIP
+		audioWriter, err := createZipEntryWithCurrentTime(zipWriter, audioFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to create audio file in ZIP: %w", err)
 		}
 
-		if convertedData != nil {
-			convertedAudioLen = len(convertedData)
-
-			// Create hash for filename
-			hash := sha256.Sum256([]byte(audioFilename))
-			audioHash := hex.EncodeToString(hash[:])[:16]
-			audioFilePath = fmt.Sprintf("audio/%s.snd", audioHash)
-
-			// Write converted audio to ZIP
-			audioWriter, err := createZipEntryWithCurrentTime(zipWriter, audioFilePath)
-			if err != nil {
-				return fmt.Errorf("failed to create audio file in ZIP: %w", err)
-			}
-
-			if _, err := audioWriter.Write(convertedData); err != nil {
-				return fmt.Errorf("failed to write audio data: %w", err)
-			}
+		if _, err := audioWriter.Write(convertedData); err != nil {
+			return fmt.Errorf("failed to write audio data: %w", err)
 		}
 	}
 
-	// 3. Create the_song.dat XML file with correct audio data length and path
-	score := createToneLibScore(midiFile, sngFile)
+	// 3. Extract beats using aubiotrack if requested and audio is available
+	var beatMap *BeatMap
+	if useAubio && mergedAudio != nil {
+		log.Printf("Running aubiotrack on merged audio file...")
+		beatTimes, err := ExtractAudioBeats(mergedAudio.FilePath)
+		if err != nil {
+			log.Printf("Warning: aubiotrack failed: %v", err)
+			beatMap = nil
+		} else {
+			beatMap = convertBeatsTimesToBeatMap(beatTimes)
+		}
+	}
+
+	// 4. Create the_song.dat XML file with correct audio data length and path
+	score := createToneLibScore(midiFile, sngFile, beatMap)
 	if score.BackingTrack != nil {
 		score.BackingTrack.Audio.DataLen = convertedAudioLen
 		score.BackingTrack.Audio.DataFile = audioFilePath
@@ -692,156 +758,25 @@ func CreateToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputPath strin
 	return nil
 }
 
-// mergeOpusFiles extracts all opus files from the SNG and merges them into a single Ogg Vorbis file
-func mergeOpusFiles(sngFile *SngFile) ([]byte, string, error) {
-	// Find all opus files in the SNG
-	var opusFiles []string
-	files := sngFile.ListFiles()
-	for _, filename := range files {
-		if strings.HasSuffix(filename, ".opus") {
-			opusFiles = append(opusFiles, filename)
+// convertBeatsTimesToBeatMap converts raw beat timestamps to ToneLib BeatMap format
+func convertBeatsTimesToBeatMap(beatTimes []float64) *BeatMap {
+	beats := make([]ToneLibBackingBeat, len(beatTimes))
+
+	for i, beatTime := range beatTimes {
+		beats[i] = ToneLibBackingBeat{
+			N: i,
+			T: fmt.Sprintf("%.15f", beatTime), // High precision for timing
 		}
 	}
 
-	if len(opusFiles) == 0 {
-		return nil, "", fmt.Errorf("no opus files found in SNG")
+	return &BeatMap{
+		Beats:    beats,
+		TotalNum: strconv.Itoa(len(beats)),
+		NST:      "", // Unknown meaning, leave blank
 	}
-
-	log.Printf("Found %d opus files to merge: %v", len(opusFiles), opusFiles)
-
-	// Create temporary directory for conversion
-	tempDir, err := os.MkdirTemp("", "tonelib-audio-*")
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Extract all opus files to temp directory
-	var inputPaths []string
-	for i, filename := range opusFiles {
-		audioData, err := sngFile.ReadFile(filename)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to read %s: %w", filename, err)
-		}
-
-		inputPath := filepath.Join(tempDir, fmt.Sprintf("input_%d.opus", i))
-		if err := os.WriteFile(inputPath, audioData, 0644); err != nil {
-			return nil, "", fmt.Errorf("failed to write temp file for %s: %w", filename, err)
-		}
-		inputPaths = append(inputPaths, inputPath)
-	}
-
-	// Create output path
-	outputPath := filepath.Join(tempDir, "output.ogg")
-
-	// Build ffmpeg command to merge all audio files
-	args := []string{}
-
-	// Add all input files
-	for _, inputPath := range inputPaths {
-		args = append(args, "-i", inputPath)
-	}
-
-	// Build the amerge filter complex string
-	if len(inputPaths) > 1 {
-		// Create filter complex for merging multiple inputs
-		filterInputs := ""
-		for i := range inputPaths {
-			filterInputs += fmt.Sprintf("[%d:a]", i)
-		}
-		filterComplex := fmt.Sprintf("%samerge=inputs=%d[aout]", filterInputs, len(inputPaths))
-
-		args = append(args,
-			"-filter_complex", filterComplex,
-			"-map", "[aout]",
-		)
-	} else {
-		// Single file, just map it directly
-		args = append(args, "-map", "0:a")
-	}
-
-	// Add output parameters
-	args = append(args,
-		"-ac", "2", // Stereo (2 channels)
-		"-ar", "44100", // 44100 Hz sample rate
-		"-c:a", "libvorbis", // Use Vorbis codec
-		"-b:a", "128k", // ~128000 bps bitrate
-		"-y", // Overwrite output file
-		outputPath,
-	)
-
-	// Run ffmpeg to merge and convert
-	log.Printf("Running ffmpeg to merge %d audio files", len(inputPaths))
-	cmd := exec.Command("ffmpeg", args...)
-
-	// Capture any error output
-	if err := cmd.Run(); err != nil {
-		return nil, "", fmt.Errorf("ffmpeg merge failed: %w", err)
-	}
-
-	// Read the converted output
-	outputData, err := os.ReadFile(outputPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read merged output: %w", err)
-	}
-
-	mergedFilename := "merged_audio.opus"
-	log.Printf("Audio merge completed successfully (output size: %d bytes)", len(outputData))
-	return outputData, mergedFilename, nil
 }
 
-// convertToOggVorbis converts audio data to Ogg Vorbis format using ffmpeg
-func convertToOggVorbis(inputData []byte, filename string) ([]byte, error) {
-	log.Printf("Converting audio file %s to Ogg Vorbis format (size: %d bytes)", filename, len(inputData))
-
-	// Create temporary directory for conversion
-	tempDir, err := os.MkdirTemp("", "tonelib-audio-*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Determine input file extension based on the original filename
-	inputExt := filepath.Ext(filename)
-	if inputExt == "" {
-		inputExt = ".opus" // Default to opus if no extension
-	}
-
-	// Create temporary input file
-	inputPath := filepath.Join(tempDir, "input"+inputExt)
-	if err := os.WriteFile(inputPath, inputData, 0644); err != nil {
-		return nil, fmt.Errorf("failed to write input file: %w", err)
-	}
-
-	// Create output path
-	outputPath := filepath.Join(tempDir, "output.ogg")
-
-	// Run ffmpeg to convert to Ogg Vorbis
-	// Parameters match the expected format: stereo, 44100 Hz, ~128000 bps
-	cmd := exec.Command("ffmpeg", "-i", inputPath,
-		"-c:a", "libvorbis", // Use Vorbis codec
-		"-ac", "2", // Stereo (2 channels)
-		"-ar", "44100", // 44100 Hz sample rate
-		"-b:a", "128k", // ~128000 bps bitrate
-		"-y", // Overwrite output file
-		outputPath)
-
-	// Capture any error output
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg conversion failed: %w", err)
-	}
-
-	// Read the converted output
-	outputData, err := os.ReadFile(outputPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read converted output: %w", err)
-	}
-
-	log.Printf("Audio conversion completed successfully (output size: %d bytes)", len(outputData))
-	return outputData, nil
-}
-
-func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
+func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) *ToneLibScore {
 	score := &ToneLibScore{
 		Info: ToneLibInfo{
 			ShowRemarks: "no",
@@ -892,6 +827,19 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
 		}
 
 		if hasOpusFiles {
+			// Create bars structure with beat map data if available
+			bars := ToneLibBackingBars{
+				Num:   "0",
+				NST:   "",
+				Beats: []ToneLibBackingBeat{},
+			}
+
+			if beatMap != nil {
+				bars.Num = beatMap.TotalNum
+				bars.NST = beatMap.NST
+				bars.Beats = beatMap.Beats
+			}
+
 			score.BackingTrack = &ToneLibBackingTrack{
 				Color:    "ff40a0a0",
 				Visible:  1,
@@ -902,12 +850,13 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile) *ToneLibScore {
 				Opt:      0,
 				VolDB:    "0",
 				Audio: ToneLibAudio{
-					Name:        "merged_audio", // Display name for merged audio
-					DataFile:    "",             // Will be updated with actual path from conversion
-					DataLen:     0,              // Will be updated with actual converted size
+					Name:        "merged.ogg", // Display name for merged audio
+					DataFile:    "",           // Will be updated with actual path from conversion
+					DataLen:     0,            // Will be updated with actual converted size
 					TimeOffset:  "0",
 					Gain:        "1",
 					ChannelMode: 0,
+					Bars:        bars,
 				},
 			}
 		}

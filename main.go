@@ -23,6 +23,7 @@ func main() {
 	exportToneLib := flag.Bool("export-tonelib-xml", false, "Export to ToneLib the_song.dat XML format")
 	createToneLibSong := flag.Bool("export-tonelib-song", false, "Create complete ToneLib .song file (ZIP archive)")
 	filterTrack := flag.String("filter-track", "", "Filter to show only tracks whose name contains this string (case-insensitive)")
+	useAubio := flag.Bool("aubio", false, "Use aubiotrack to detect beats from audio for ToneLib export")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
@@ -161,13 +162,13 @@ func main() {
 		}
 		printTimeline(midiFile, filename)
 	} else if *exportToneLib {
-		exportToToneLib(midiFile, sngFile, filename)
+		exportToToneLib(midiFile, sngFile, filename, *useAubio)
 	} else if *createToneLibSong {
 		outputFile := flag.Arg(1)
 		if outputFile == "" {
 			outputFile = "output.song"
 		}
-		createToneLibSongFile(midiFile, sngFile, outputFile)
+		createToneLibSongFile(midiFile, sngFile, outputFile, *useAubio)
 	} else {
 		if sngFile != nil {
 			printSngFile(sngFile, *jsonOutput)
@@ -424,8 +425,12 @@ func printSngFile(sngFile *SngFile, jsonOutput bool) {
 }
 
 // exportToToneLib exports MIDI/SNG data to ToneLib the_song.dat XML format
-func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
-	err := ConvertToToneLib(midiFile, sngFile, "")
+func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string, useAubio bool) {
+	// For XML export, aubio is not supported since there's no audio file output
+	if useAubio {
+		log.Printf("Warning: --aubio flag is not supported for XML export, use --export-tonelib-song instead")
+	}
+	err := ConvertToToneLib(midiFile, sngFile, "", nil)
 	if err != nil {
 		log.Printf("Error exporting to ToneLib: %v\n", err)
 		return
@@ -433,10 +438,10 @@ func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
 }
 
 // createToneLibSongFile creates a complete ToneLib .song ZIP archive
-func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile string) {
+func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile string, useAubio bool) {
 	fmt.Printf("Creating ToneLib song file: %s\n", outputFile)
 
-	err := CreateToneLibSongFile(midiFile, sngFile, outputFile)
+	err := CreateToneLibSongFile(midiFile, sngFile, outputFile, useAubio)
 	if err != nil {
 		log.Printf("Error creating ToneLib song file: %v\n", err)
 		return
