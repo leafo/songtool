@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -792,9 +793,7 @@ func writeScoreXML(score *ToneLibScore, writer io.Writer) error {
 	// Pattern matches: <tagname attributes></tagname> where tagname is repeated
 	emptyTagRegex := regexp.MustCompile(`<(\w+)([^>]*?)></\w+>`)
 	xmlString = emptyTagRegex.ReplaceAllStringFunc(xmlString, func(match string) string {
-		// Extract tag name and attributes more carefully
-		openTagRegex := regexp.MustCompile(`<(\w+)([^>]*?)></\w+>`)
-		matches := openTagRegex.FindStringSubmatch(match)
+		matches := emptyTagRegex.FindStringSubmatch(match)
 		if len(matches) >= 3 {
 			tagName := matches[1]
 			attributes := matches[2]
@@ -803,7 +802,7 @@ func writeScoreXML(score *ToneLibScore, writer io.Writer) error {
 				return "<" + tagName + attributes + "/>"
 			}
 		}
-		return match // Return unchanged if pattern doesn't match properly
+		return match
 	})
 
 	// 2. Convert Unix line endings (LF) to DOS line endings (CRLF)
@@ -1178,13 +1177,9 @@ func groupLyricsByMeasure(lyricEvents []LyricEvent, timeline *Timeline) []Measur
 
 		// Sort events by time within the measure
 		// (they should already be sorted, but ensure consistency)
-		for i := 0; i < len(events)-1; i++ {
-			for j := i + 1; j < len(events); j++ {
-				if events[i].Time > events[j].Time {
-					events[i], events[j] = events[j], events[i]
-				}
-			}
-		}
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].Time < events[j].Time
+		})
 
 		// Collect raw lyrics for this measure
 		var rawLyrics []string
