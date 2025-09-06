@@ -82,10 +82,25 @@ type TrackSection struct {
 	TrackEvents []TrackEvent   `json:"trackEvents"`
 }
 
+// NoteFlags represents various flags that can be applied to notes
+type NoteFlags int
+
+const (
+	FlagNone       NoteFlags = 0
+	FlagForced     NoteFlags = 1 << iota // Note 5 in chart
+	FlagTap                              // Note 6 in chart
+	FlagOpen                             // Note 7 in chart
+	FlagDoubleKick                       // Drums: Note 32
+	FlagCymbal                           // Pro drums: Notes 66,67,68
+	FlagAccent                           // Drums: Notes 34-39
+	FlagGhost                            // Drums: Notes 40-45
+)
+
 type NoteEvent struct {
-	Tick    uint32 `json:"tick"`
-	Fret    uint8  `json:"fret"`
-	Sustain uint32 `json:"sustain"`
+	Tick    uint32    `json:"tick"`
+	Fret    uint8     `json:"fret"`
+	Sustain uint32    `json:"sustain"`
+	Flags   NoteFlags `json:"flags"`
 }
 
 type SpecialEvent struct {
@@ -97,6 +112,14 @@ type SpecialEvent struct {
 type TrackEvent struct {
 	Tick uint32 `json:"tick"`
 	Text string `json:"text"`
+}
+
+// PendingFlag represents a flag that needs to be applied to notes after all notes are parsed
+type PendingFlag struct {
+	Tick     uint32
+	NoteNum  int
+	Flag     NoteFlags
+	ApplyAll bool // If true, apply to all notes at this tick
 }
 
 func OpenChartFile(filename string) (*ChartFile, error) {
@@ -127,7 +150,7 @@ func ParseChartFile(reader io.Reader) (*ChartFile, error) {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
-		// Handle BOM if present
+		// Handle BOM (Byte Order Mark) if present at start of file
 		if strings.HasPrefix(line, "\ufeff") {
 			line = strings.TrimPrefix(line, "\ufeff")
 		}
@@ -176,6 +199,11 @@ func ParseChartFile(reader io.Reader) (*ChartFile, error) {
 		return nil, fmt.Errorf("error reading chart file: %w", err)
 	}
 
+	// Validate the parsed chart
+	if err := validateChart(chart); err != nil {
+		return nil, fmt.Errorf("chart validation failed: %w", err)
+	}
+
 	return chart, nil
 }
 
@@ -199,16 +227,15 @@ func parseSectionLine(chart *ChartFile, section, line string) error {
 func parseSongLine(chart *ChartFile, line string) error {
 	parts := strings.SplitN(line, "=", 2)
 	if len(parts) != 2 {
-		return nil // Skip malformed lines
+		// Skip malformed lines but don't return error to allow parsing to continue
+		return nil
 	}
 
 	key := strings.TrimSpace(parts[0])
 	value := strings.TrimSpace(parts[1])
 
-	// Remove quotes if present
-	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-		value = value[1 : len(value)-1]
-	}
+	// Remove quotes and handle escape sequences
+	value = unquoteString(value)
 
 	switch key {
 	case "Name":
@@ -277,13 +304,15 @@ func parseSongLine(chart *ChartFile, line string) error {
 func parseSyncTrackLine(chart *ChartFile, line string) error {
 	parts := strings.SplitN(line, "=", 2)
 	if len(parts) != 2 {
+		// Skip malformed lines and continue parsing
 		return nil
 	}
 
 	tickStr := strings.TrimSpace(parts[0])
 	tick, err := strconv.ParseUint(tickStr, 10, 32)
 	if err != nil {
-		return fmt.Errorf("invalid tick value '%s': %w", tickStr, err)
+		// Skip lines with invalid tick values and continue parsing
+		return nil
 	}
 
 	eventParts := strings.Fields(strings.TrimSpace(parts[1]))
@@ -299,7 +328,7 @@ func parseSyncTrackLine(chart *ChartFile, line string) error {
 			if bpm, err := strconv.ParseUint(eventParts[1], 10, 32); err == nil {
 				chart.SyncTrack.BPMEvents = append(chart.SyncTrack.BPMEvents, BPMEvent{
 					Tick: uint32(tick),
-					BPM:  uint32(bpm),
+					BPM:  uint32(bpm), // BPM stored as BPM * 1000 per spec
 				})
 			}
 		}
@@ -336,13 +365,15 @@ func parseSyncTrackLine(chart *ChartFile, line string) error {
 func parseEventsLine(chart *ChartFile, line string) error {
 	parts := strings.SplitN(line, "=", 2)
 	if len(parts) != 2 {
+		// Skip malformed lines and continue parsing
 		return nil
 	}
 
 	tickStr := strings.TrimSpace(parts[0])
 	tick, err := strconv.ParseUint(tickStr, 10, 32)
 	if err != nil {
-		return fmt.Errorf("invalid tick value '%s': %w", tickStr, err)
+		// Skip lines with invalid tick values and continue parsing
+		return nil
 	}
 
 	eventParts := strings.Fields(strings.TrimSpace(parts[1]))
@@ -350,11 +381,9 @@ func parseEventsLine(chart *ChartFile, line string) error {
 		return nil
 	}
 
-	// Join remaining parts and remove quotes
+	// Join remaining parts and remove quotes with escape sequence handling
 	text := strings.Join(eventParts[1:], " ")
-	if len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"' {
-		text = text[1 : len(text)-1]
-	}
+	text = unquoteString(text)
 
 	chart.Events.GlobalEvents = append(chart.Events.GlobalEvents, GlobalEvent{
 		Tick: uint32(tick),
@@ -367,13 +396,15 @@ func parseEventsLine(chart *ChartFile, line string) error {
 func parseTrackLine(chart *ChartFile, section, line string) error {
 	parts := strings.SplitN(line, "=", 2)
 	if len(parts) != 2 {
+		// Skip malformed lines and continue parsing
 		return nil
 	}
 
 	tickStr := strings.TrimSpace(parts[0])
 	tick, err := strconv.ParseUint(tickStr, 10, 32)
 	if err != nil {
-		return fmt.Errorf("invalid tick value '%s': %w", tickStr, err)
+		// Skip lines with invalid tick values and continue parsing
+		return nil
 	}
 
 	eventParts := strings.Fields(strings.TrimSpace(parts[1]))
@@ -396,11 +427,43 @@ func parseTrackLine(chart *ChartFile, section, line string) error {
 		if len(eventParts) >= 3 {
 			if fret, err := strconv.ParseUint(eventParts[1], 10, 8); err == nil {
 				if sustain, err := strconv.ParseUint(eventParts[2], 10, 32); err == nil {
-					track.Notes = append(track.Notes, NoteEvent{
+					note := NoteEvent{
 						Tick:    uint32(tick),
 						Fret:    uint8(fret),
 						Sustain: uint32(sustain),
-					})
+						Flags:   FlagNone,
+					}
+
+					// Handle special note types based on fret number
+					switch fret {
+					case 5: // Forced flag - don't add as note, will need post-processing
+						// Skip for now - would need proper flag processing system
+						return nil
+					case 6: // Tap flag - don't add as note, will need post-processing
+						// Skip for now - would need proper flag processing system
+						return nil
+					case 7: // Open note
+						note.Flags |= FlagOpen
+					case 32: // Double kick (drums)
+						note.Fret = 0 // Convert to kick
+						note.Flags |= FlagDoubleKick
+					default:
+						// Check for drum accent/ghost flags
+						if fret >= 34 && fret <= 39 { // Accent flags
+							// Skip for now - would need proper flag processing system
+							return nil
+						}
+						if fret >= 40 && fret <= 45 { // Ghost flags
+							// Skip for now - would need proper flag processing system
+							return nil
+						}
+						if fret >= 66 && fret <= 68 { // Cymbal flags
+							// Skip for now - would need proper flag processing system
+							return nil
+						}
+					}
+
+					track.Notes = append(track.Notes, note)
 				}
 			}
 		}
@@ -430,22 +493,191 @@ func parseTrackLine(chart *ChartFile, section, line string) error {
 	return nil
 }
 
-func isTrackSection(section string) bool {
-	difficulties := []string{"Easy", "Medium", "Hard", "Expert"}
-	instruments := []string{"Single", "DoubleGuitar", "DoubleBass", "DoubleRhythm", "Drums", "Keyboard", "GHLGuitar", "GHLBass", "GHLCoop", "GHLRhythm"}
+// sectionNameToTrackInfo maps section names to track information
+var sectionNameToTrackInfo = map[string]bool{
+	// Guitar tracks
+	"EasySingle":   true,
+	"MediumSingle": true,
+	"HardSingle":   true,
+	"ExpertSingle": true,
 
-	for _, diff := range difficulties {
-		for _, inst := range instruments {
-			if section == diff+inst {
-				return true
-			}
+	// Guitar Coop tracks
+	"EasyDoubleGuitar":   true,
+	"MediumDoubleGuitar": true,
+	"HardDoubleGuitar":   true,
+	"ExpertDoubleGuitar": true,
+
+	// Bass tracks
+	"EasyDoubleBass":   true,
+	"MediumDoubleBass": true,
+	"HardDoubleBass":   true,
+	"ExpertDoubleBass": true,
+
+	// Rhythm tracks
+	"EasyDoubleRhythm":   true,
+	"MediumDoubleRhythm": true,
+	"HardDoubleRhythm":   true,
+	"ExpertDoubleRhythm": true,
+
+	// Drums tracks
+	"EasyDrums":   true,
+	"MediumDrums": true,
+	"HardDrums":   true,
+	"ExpertDrums": true,
+
+	// Keys tracks
+	"EasyKeyboard":   true,
+	"MediumKeyboard": true,
+	"HardKeyboard":   true,
+	"ExpertKeyboard": true,
+
+	// GH Live Guitar tracks
+	"EasyGHLGuitar":   true,
+	"MediumGHLGuitar": true,
+	"HardGHLGuitar":   true,
+	"ExpertGHLGuitar": true,
+
+	// GH Live Bass tracks
+	"EasyGHLBass":   true,
+	"MediumGHLBass": true,
+	"HardGHLBass":   true,
+	"ExpertGHLBass": true,
+
+	// GH Live Rhythm tracks
+	"EasyGHLRhythm":   true,
+	"MediumGHLRhythm": true,
+	"HardGHLRhythm":   true,
+	"ExpertGHLRhythm": true,
+
+	// GH Live Coop tracks
+	"EasyGHLCoop":   true,
+	"MediumGHLCoop": true,
+	"HardGHLCoop":   true,
+	"ExpertGHLCoop": true,
+}
+
+func isTrackSection(section string) bool {
+	return sectionNameToTrackInfo[section]
+}
+
+// validateChart performs basic validation on the parsed chart
+func validateChart(chart *ChartFile) error {
+	// Check resolution is valid
+	if chart.Song.Resolution == 0 {
+		return fmt.Errorf("invalid resolution: %d", chart.Song.Resolution)
+	}
+
+	// Check that we have at least one tempo event
+	if len(chart.SyncTrack.BPMEvents) == 0 {
+		// This is a common issue - add a default BPM event rather than failing
+		chart.SyncTrack.BPMEvents = append(chart.SyncTrack.BPMEvents, BPMEvent{
+			Tick: 0,
+			BPM:  120000, // Default 120 BPM * 1000
+		})
+	}
+
+	// Check that first tempo event is at tick 0 or very close to it
+	if len(chart.SyncTrack.BPMEvents) > 0 && chart.SyncTrack.BPMEvents[0].Tick > uint32(chart.Song.Resolution) {
+		return fmt.Errorf("first BPM event should be near the beginning of the chart")
+	}
+
+	// Validate BPM values are reasonable (stored as BPM * 1000)
+	for _, bpmEvent := range chart.SyncTrack.BPMEvents {
+		actualBPM := float64(bpmEvent.BPM) / 1000.0
+		if actualBPM < 1.0 || actualBPM > 1000.0 {
+			return fmt.Errorf("invalid BPM value: %f at tick %d", actualBPM, bpmEvent.Tick)
 		}
 	}
-	return false
+
+	// Check that we have at least one track (warn but don't fail)
+	if len(chart.Tracks) == 0 {
+		// This is unusual but not necessarily an error - continue parsing
+	}
+
+	// Validate each track
+	for trackName, track := range chart.Tracks {
+		if err := validateTrack(&track, trackName); err != nil {
+			return fmt.Errorf("track validation failed for %s: %w", trackName, err)
+		}
+	}
+
+	return nil
+}
+
+// validateTrack performs validation on an individual track
+func validateTrack(track *TrackSection, trackName string) error {
+	if track == nil {
+		return fmt.Errorf("track is nil")
+	}
+
+	// Get expected max fret for this track type
+	maxFret := getMaxFretForTrack(trackName)
+
+	// Validate note fret ranges
+	for i, note := range track.Notes {
+		if note.Fret < 0 || int(note.Fret) > maxFret {
+			return fmt.Errorf("note %d has invalid fret %d for track %s (max: %d)",
+				i, note.Fret, trackName, maxFret)
+		}
+	}
+
+	return nil
+}
+
+// getMaxFretForTrack returns the maximum fret number for a track type
+func getMaxFretForTrack(trackName string) int {
+	// Determine instrument type from track name
+	if strings.Contains(trackName, "Drums") {
+		return 5 // 0-5 pads
+	} else if strings.Contains(trackName, "GHL") {
+		return 8 // GH Live supports up to note 8
+	} else {
+		return 7 // Guitar/Bass/Keys: 0-4 frets + open (7)
+	}
+}
+
+// unquoteString removes quotes and handles escape sequences
+func unquoteString(s string) string {
+	// Remove surrounding quotes if present
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			s = s[1 : len(s)-1]
+		}
+	}
+
+	// Handle escape sequences
+	result := strings.Builder{}
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				result.WriteByte('\n')
+			case 't':
+				result.WriteByte('\t')
+			case 'r':
+				result.WriteByte('\r')
+			case '\\':
+				result.WriteByte('\\')
+			case '"':
+				result.WriteByte('"')
+			case '\'':
+				result.WriteByte('\'')
+			default:
+				// Unknown escape, keep both characters
+				result.WriteByte(s[i])
+				result.WriteByte(s[i+1])
+			}
+			i++ // Skip the next character
+		} else {
+			result.WriteByte(s[i])
+		}
+	}
+
+	return result.String()
 }
 
 func (c *ChartFile) GetBPMAtTick(tick uint32) float64 {
-	var currentBPM uint32 = 120000 // Default 120 BPM
+	var currentBPM uint32 = 120000 // Default 120 BPM * 1000
 
 	// Handle case where there are no BPM events
 	if len(c.SyncTrack.BPMEvents) == 0 {
@@ -460,7 +692,7 @@ func (c *ChartFile) GetBPMAtTick(tick uint32) float64 {
 		}
 	}
 
-	return float64(currentBPM) / 1000.0
+	return float64(currentBPM) / 1000.0 // Convert from BPM*1000 to actual BPM
 }
 
 func (c *ChartFile) String() string {
