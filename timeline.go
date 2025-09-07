@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"sort"
@@ -31,53 +32,6 @@ type Timeline struct {
 	Measures     []Measure  `json:"measures"`
 	BeatNotes    []BeatNote `json:"beat_notes"`
 	TicksPerBeat float64    `json:"ticks_per_beat"` // Derived from time signature and tempo
-}
-
-// ExtractBeatTimeline analyzes the BEAT track and creates a timeline with measure information
-func ExtractBeatTimeline(smfData *smf.SMF) (*Timeline, error) {
-	// Find the BEAT track
-	var beatTrack smf.Track
-	var found bool
-
-	for _, track := range smfData.Tracks {
-		trackName := getTrackName(track)
-		if trackName == "BEAT" {
-			beatTrack = track
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return nil, fmt.Errorf("BEAT track not found")
-	}
-
-	// Extract beat notes with accurate timing from all tracks
-	beatNotes, err := extractBeatNotesWithTiming(smfData, beatTrack)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract beat notes: %w", err)
-	}
-
-	if len(beatNotes) == 0 {
-		return nil, fmt.Errorf("no beat notes found in BEAT track")
-	}
-
-	// Get ticks per quarter note for BPM calculations
-	ticksPerQuarter, ok := smfData.TimeFormat.(smf.MetricTicks)
-	if !ok {
-		return nil, fmt.Errorf("unsupported time format, expected MetricTicks")
-	}
-
-	// Create measures from beat pattern
-	measures := createMeasuresFromBeats(beatNotes)
-
-	timeline := &Timeline{
-		Measures:     measures,
-		BeatNotes:    beatNotes,
-		TicksPerBeat: float64(ticksPerQuarter),
-	}
-
-	return timeline, nil
 }
 
 // extractBeatNotesWithTiming processes all MIDI events chronologically to extract beats with accurate timing
@@ -277,6 +231,163 @@ func createMeasuresFromBeats(beatNotes []BeatNote) []Measure {
 	return measures
 }
 
+// createMeasuresFromChart creates measure objects directly from chart timing data
+func createMeasuresFromChart(chart *ChartFile) []Measure {
+	var measures []Measure
+
+	// Create combined timing events sorted by tick
+	type timingEvent struct {
+		tick    uint32
+		bpm     *uint32 // BPM * 1000, nil if not a BPM event
+		timeSig *TimeSigEvent
+	}
+
+	var events []timingEvent
+
+	// Add BPM events
+	for _, bpmEvent := range chart.SyncTrack.BPMEvents {
+		events = append(events, timingEvent{
+			tick: bpmEvent.Tick,
+			bpm:  &bpmEvent.BPM,
+		})
+	}
+
+	// Add time signature events
+	for _, tsEvent := range chart.SyncTrack.TimeSigEvents {
+		events = append(events, timingEvent{
+			tick:    tsEvent.Tick,
+			timeSig: &tsEvent,
+		})
+	}
+
+	// Sort events by tick
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].tick < events[j].tick
+	})
+
+	// Initialize current state
+	currentBPM := float64(chart.SyncTrack.BPMEvents[0].BPM) / 1000.0 // Convert from BPM*1000
+	beatsPerMeasure := 4                                             // Default 4/4 time
+
+	// Find first time signature if available
+	for _, tsEvent := range chart.SyncTrack.TimeSigEvents {
+		if tsEvent.Tick == 0 {
+			beatsPerMeasure = int(tsEvent.Numerator)
+			break
+		}
+	}
+
+	currentTick := uint32(0)
+	measureStartTick := uint32(0)
+	measureStartSeconds := 0.0
+
+	// Calculate ticks per measure for current settings
+	ticksPerBeat := float64(chart.Song.Resolution)
+	ticksPerMeasure := ticksPerBeat * float64(beatsPerMeasure)
+
+	for {
+		nextEventTick := uint32(math.MaxUint32)
+
+		// Find next timing event that would affect us
+		for _, event := range events {
+			if event.tick > currentTick && event.tick < nextEventTick {
+				nextEventTick = event.tick
+			}
+		}
+
+		// Calculate where this measure should end based on current settings
+		measureEndTick := measureStartTick + uint32(ticksPerMeasure)
+
+		// If there's a timing event before our measure ends, end measure there
+		if nextEventTick < measureEndTick {
+			measureEndTick = nextEventTick
+		}
+
+		// Calculate measure duration in seconds
+		measureDurationTicks := measureEndTick - measureStartTick
+		measureDurationSeconds := float64(measureDurationTicks) / ticksPerBeat * 60.0 / currentBPM
+
+		// Create the measure
+		measure := Measure{
+			StartTime:        measureStartTick,
+			EndTime:          measureEndTick,
+			StartTimeSeconds: measureStartSeconds,
+			EndTimeSeconds:   measureStartSeconds + measureDurationSeconds,
+			BeatsPerMeasure:  beatsPerMeasure,
+			BeatsPerMinute:   currentBPM,
+			BeatNotes:        []BeatNote{}, // Empty for chart-based measures
+		}
+
+		measures = append(measures, measure)
+
+		// Update for next measure
+		measureStartTick = measureEndTick
+		measureStartSeconds = measure.EndTimeSeconds
+		currentTick = measureEndTick
+
+		// Update settings if we hit a timing event
+		if nextEventTick == measureEndTick {
+			for _, event := range events {
+				if event.tick == nextEventTick {
+					if event.bpm != nil {
+						currentBPM = float64(*event.bpm) / 1000.0
+					}
+					if event.timeSig != nil {
+						beatsPerMeasure = int(event.timeSig.Numerator)
+						ticksPerMeasure = ticksPerBeat * float64(beatsPerMeasure)
+					}
+				}
+			}
+		}
+
+		// Try to determine song end from note events
+		if len(measures) > 0 {
+			lastNoteTime := getLastNoteTimeFromChart(chart)
+			if lastNoteTime > 0 && currentTick > lastNoteTime+uint32(ticksPerMeasure) {
+				break
+			}
+		}
+
+		// If no more timing events and we have some measures, create a few more and stop
+		if nextEventTick == uint32(math.MaxUint32) && len(measures) >= 4 {
+			// Create one more measure and stop
+			measureEndTick = measureStartTick + uint32(ticksPerMeasure)
+			measureDurationTicks = measureEndTick - measureStartTick
+			measureDurationSeconds = float64(measureDurationTicks) / ticksPerBeat * 60.0 / currentBPM
+
+			finalMeasure := Measure{
+				StartTime:        measureStartTick,
+				EndTime:          measureEndTick,
+				StartTimeSeconds: measureStartSeconds,
+				EndTimeSeconds:   measureStartSeconds + measureDurationSeconds,
+				BeatsPerMeasure:  beatsPerMeasure,
+				BeatsPerMinute:   currentBPM,
+				BeatNotes:        []BeatNote{},
+			}
+			measures = append(measures, finalMeasure)
+			break
+		}
+	}
+
+	return measures
+}
+
+// getLastNoteTimeFromChart finds the latest note time across all tracks
+func getLastNoteTimeFromChart(chart *ChartFile) uint32 {
+	var lastTime uint32
+
+	for _, track := range chart.Tracks {
+		for _, note := range track.Notes {
+			noteEndTime := note.Tick + note.Sustain
+			if noteEndTime > lastTime {
+				lastTime = noteEndTime
+			}
+		}
+	}
+
+	return lastTime
+}
+
 // GetMeasureAtTime finds the measure that contains the given time
 func (t *Timeline) GetMeasureAtTime(time uint32) *Measure {
 	for i := range t.Measures {
@@ -397,4 +508,105 @@ func abs(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+// SongInterface implementations
+
+// GetTimeline extracts timeline from MIDI BEAT track
+func (m *MidiFile) GetTimeline() (*Timeline, error) {
+	// Find the BEAT track
+	var beatTrack smf.Track
+	var found bool
+
+	for _, track := range m.SMF.Tracks {
+		trackName := getTrackName(track)
+		if trackName == "BEAT" {
+			beatTrack = track
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return nil, fmt.Errorf("BEAT track not found")
+	}
+
+	// Extract beat notes with accurate timing from all tracks
+	beatNotes, err := extractBeatNotesWithTiming(m.SMF, beatTrack)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract beat notes: %w", err)
+	}
+
+	if len(beatNotes) == 0 {
+		return nil, fmt.Errorf("no beat notes found in BEAT track")
+	}
+
+	// Get ticks per quarter note for BPM calculations
+	ticksPerQuarter, ok := m.SMF.TimeFormat.(smf.MetricTicks)
+	if !ok {
+		return nil, fmt.Errorf("unsupported time format, expected MetricTicks")
+	}
+
+	// Create measures from beat pattern
+	measures := createMeasuresFromBeats(beatNotes)
+
+	timeline := &Timeline{
+		Measures:     measures,
+		BeatNotes:    beatNotes,
+		TicksPerBeat: float64(ticksPerQuarter),
+	}
+
+	return timeline, nil
+}
+
+// GetTimeline extracts timeline information from chart file
+func (c *ChartFile) GetTimeline() (*Timeline, error) {
+	if c == nil {
+		return nil, fmt.Errorf("chart is nil")
+	}
+
+	// Ensure we have at least one BPM event
+	if len(c.SyncTrack.BPMEvents) == 0 {
+		return nil, fmt.Errorf("no BPM events found in chart")
+	}
+
+	// Create measures from chart timing data
+	measures := createMeasuresFromChart(c)
+
+	timeline := &Timeline{
+		Measures:     measures,
+		BeatNotes:    []BeatNote{}, // Empty for chart-based timelines
+		TicksPerBeat: float64(c.Song.Resolution),
+	}
+
+	return timeline, nil
+}
+
+// GetTimeline extracts timeline information from SNG file
+func (s *SngFile) GetTimeline() (*Timeline, error) {
+	// Try to extract from MIDI file first
+	midiData, midiErr := s.ReadFile("notes.mid")
+	if midiErr == nil {
+		smfData, err := smf.ReadFrom(bytes.NewReader(midiData))
+		if err == nil {
+			midiFile := &MidiFile{SMF: smfData}
+			return midiFile.GetTimeline()
+		}
+	}
+
+	// Fall back to chart file
+	chartData, chartErr := s.ReadFile("notes.chart")
+	if chartErr == nil {
+		chartFile, err := ParseChartFile(bytes.NewReader(chartData))
+		if err == nil {
+			return chartFile.GetTimeline()
+		}
+	}
+
+	// Return error if neither worked
+	if midiErr != nil && chartErr != nil {
+		return nil, fmt.Errorf("no MIDI or chart file found in SNG package")
+	}
+
+	return nil, fmt.Errorf("failed to parse timeline from SNG file")
 }

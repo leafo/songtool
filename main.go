@@ -36,24 +36,24 @@ func main() {
 
 	filename := flag.Arg(0)
 
-	var sngFile *SngFile
-	var midiFile *smf.SMF
-	var chartFile *ChartFile
+	var song SongInterface
+	var sngFile *SngFile  // Keep for SNG-specific operations
+	var midiFile *smf.SMF // Keep for MIDI-specific operations
+	var chartFile *ChartFile // Keep for chart-specific operations
 	var err error
 
 	ext := strings.ToLower(filepath.Ext(filename))
 
 	if ext == ".sng" {
 		sngFile, err = OpenSngFile(filename)
-
 		if err != nil {
 			log.Printf("Error opening SNG file: %v\n", err)
 			os.Exit(1)
 		}
-
 		defer sngFile.Close()
+		song = sngFile
 
-		// try to load midi file
+		// Also try to load individual files for legacy operations
 		midiData, midiErr := sngFile.ReadFile("notes.mid")
 		if midiErr == nil {
 			midiFile, err = smf.ReadFrom(bytes.NewReader(midiData))
@@ -62,7 +62,6 @@ func main() {
 			}
 		}
 
-		// try to load chart file
 		chartData, chartErr := sngFile.ReadFile("notes.chart")
 		if chartErr == nil {
 			chartFile, err = ParseChartFile(bytes.NewReader(chartData))
@@ -73,20 +72,18 @@ func main() {
 			}
 		}
 
-		// warn if neither file was found
 		if midiErr != nil && chartErr != nil {
 			log.Printf("No MIDI or chart file found in SNG package\n")
 		}
 	} else if ext == ".chart" {
-		// treat the file as a chart file
 		chartFile, err = OpenChartFile(filename)
 		if err != nil {
 			log.Printf("Error opening chart file: %v\n", err)
 			os.Exit(1)
 		}
+		song = chartFile
 	} else {
 		// treat the file as a regular midi file
-
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Printf("Error opening file: %v\n", err)
@@ -99,7 +96,7 @@ func main() {
 			log.Printf("Error reading MIDI file: %v\n", err)
 			os.Exit(1)
 		}
-
+		song = &MidiFile{SMF: midiFile}
 	}
 
 	if *exportGmDrums || *exportGmVocals || *exportGmBass || *exportGm {
@@ -177,30 +174,23 @@ func main() {
 
 		fmt.Printf("%s exported to: %s\n", exportType, outputFile)
 	} else if *printTimeline {
-		if midiFile == nil {
-			log.Printf("No MIDI data available for timeline extraction\n")
+		timeline, err := song.GetTimeline()
+		if err != nil {
+			log.Printf("Error extracting timeline: %v\n", err)
 			os.Exit(1)
 		}
-		printTimeline := func(midiFile *smf.SMF, filename string) {
-			timeline, err := ExtractBeatTimeline(midiFile)
-			if err != nil {
-				log.Printf("Error extracting timeline: %v\n", err)
-				return
-			}
 
-			if *jsonOutput {
-				jsonData, err := json.MarshalIndent(timeline, "", "  ")
-				if err != nil {
-					log.Printf("Error marshaling timeline to JSON: %v\n", err)
-					return
-				}
-				fmt.Println(string(jsonData))
-			} else {
-				fmt.Printf("Timeline for: %s\n", filename)
-				fmt.Print(timeline.String())
+		if *jsonOutput {
+			jsonData, err := json.MarshalIndent(timeline, "", "  ")
+			if err != nil {
+				log.Printf("Error marshaling timeline to JSON: %v\n", err)
+				os.Exit(1)
 			}
+			fmt.Println(string(jsonData))
+		} else {
+			fmt.Printf("Timeline for: %s\n", filename)
+			fmt.Print(timeline.String())
 		}
-		printTimeline(midiFile, filename)
 	} else if *exportToneLib {
 		if midiFile == nil {
 			log.Printf("No MIDI data available for ToneLib export\n")
@@ -500,7 +490,8 @@ func printSngFile(sngFile *SngFile, jsonOutput bool) {
 // exportToToneLib exports MIDI/SNG data to ToneLib the_song.dat XML format
 func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
 	// Generate beat map from timeline data
-	timeline, _ := ExtractBeatTimeline(midiFile)
+	midiFileWrapper := &MidiFile{SMF: midiFile}
+	timeline, _ := midiFileWrapper.GetTimeline()
 	beatMap := generateBeatsFromTimeline(timeline)
 
 	var writer io.Writer

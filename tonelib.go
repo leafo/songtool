@@ -458,34 +458,6 @@ func WriteToneLibXMLTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile, be
 	return writeScoreXML(score, writer)
 }
 
-// createDefaultBarIndex creates a simple bar structure with default 120 BPM tempo
-func createDefaultBarIndex(midiFile *smf.SMF) ToneLibBarIndex {
-	// Estimate number of bars based on MIDI length
-	// This is a rough calculation - in practice you'd want tempo events
-	numBars := estimateBarCount(midiFile)
-
-	bars := make([]ToneLibBar, numBars)
-	for i := 0; i < numBars; i++ {
-		bar := ToneLibBar{
-			ID:     i + 1,
-			JamSet: 0,
-		}
-
-		// Set tempo on first bar, and time signature
-		if i == 0 {
-			bar.Tempo = ToneLibDefaultTempo
-			bar.TimeSign = &ToneLibTimeSignature{
-				Numerator: ToneLibDefaultBeatsPerMeasure,
-				Duration:  ToneLibQuarterNoteDuration,
-			}
-		}
-
-		bars[i] = bar
-	}
-
-	return ToneLibBarIndex{Bars: bars}
-}
-
 // createBarIndexFromTimeline creates bar index from extracted BEAT track timeline
 func createBarIndexFromTimeline(timeline *Timeline) ToneLibBarIndex {
 	if len(timeline.Measures) == 0 {
@@ -749,34 +721,6 @@ func createBassBarsFromNotes(bassNotes []BassNote, midiFile *smf.SMF, numBars in
 	return createBarsFromNotes(bassNotes, config)
 }
 
-func estimateBarCount(midiFile *smf.SMF) int {
-	// Simple estimation based on file length
-	// In practice, you'd analyze the actual MIDI events
-	maxTicks := uint32(0)
-
-	for _, track := range midiFile.Tracks {
-		currentTick := uint32(0)
-		for _, event := range track {
-			currentTick += event.Delta
-		}
-		if currentTick > maxTicks {
-			maxTicks = currentTick
-		}
-	}
-
-	// Assume 480 ticks per quarter note, 4 beats per bar
-	if tf, ok := midiFile.TimeFormat.(smf.MetricTicks); ok {
-		ticksPerBar := uint32(tf) * 4
-		bars := int((maxTicks + ticksPerBar - 1) / ticksPerBar) // Ceiling division
-		if bars < 1 {
-			bars = 1
-		}
-		return bars
-	}
-
-	return 4 // Default fallback
-}
-
 // printXML outputs the ToneLib score as XML to stdout
 func writeScoreXML(score *ToneLibScore, writer io.Writer) error {
 	// Buffer the XML output for post-processing
@@ -853,7 +797,11 @@ func WriteToneLibSongTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile) e
 	}
 
 	// 3. Generate beats from timeline
-	timeline, _ := ExtractBeatTimeline(midiFile)
+	timeline, err := (&MidiFile{midiFile}).GetTimeline()
+	if err != nil {
+		return fmt.Errorf("failed to get timeline: %w", err)
+	}
+
 	beatMap := generateBeatsFromTimeline(timeline)
 
 	// 4. Create and write the_song.dat XML
@@ -995,11 +943,10 @@ func createToneLibInfo(midiFile *smf.SMF, sngFile *SngFile) ToneLibInfo {
 }
 
 // createToneLibBarIndex extracts timeline and creates the bar index
-func createToneLibBarIndex(midiFile *smf.SMF) (ToneLibBarIndex, *Timeline, error) {
-	timeline, err := ExtractBeatTimeline(midiFile)
+func createToneLibBarIndex(song SongInterface) (ToneLibBarIndex, *Timeline, error) {
+	timeline, err := song.GetTimeline()
 	if err != nil {
-		// If no BEAT track, create a simple bar structure with default tempo
-		return createDefaultBarIndex(midiFile), nil, nil
+		return ToneLibBarIndex{}, nil, fmt.Errorf("failed to create timeline: %w", err)
 	}
 
 	barIndex := createBarIndexFromTimeline(timeline)
@@ -1061,7 +1008,10 @@ func createBackingTrackIfNeeded(sngFile *SngFile, beatMap *BeatMap) *ToneLibBack
 }
 
 // createToneLibScore creates a complete ToneLib score from MIDI and SNG data
+// TODO: in the future this will take a SongInterface instead of a SMF
 func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) *ToneLibScore {
+	songInterface := &MidiFile{midiFile}
+
 	// Create the base score structure
 	score := &ToneLibScore{}
 
@@ -1069,7 +1019,7 @@ func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) *
 	score.Info = createToneLibInfo(midiFile, sngFile)
 
 	// 2. Create bar index and extract timeline
-	barIndex, timeline, _ := createToneLibBarIndex(midiFile)
+	barIndex, timeline, _ := createToneLibBarIndex(songInterface)
 	score.BarIndex = barIndex
 
 	// 3. Create tracks from MIDI - ensure bar count matches BarIndex

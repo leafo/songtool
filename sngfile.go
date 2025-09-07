@@ -434,3 +434,4 @@ func (s *SngFile) GetMergedAudio() (*MergedAudio, error) {
 
 	return mergedAudio, nil
 }
+

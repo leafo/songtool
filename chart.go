@@ -676,6 +676,7 @@ func unquoteString(s string) string {
 	return result.String()
 }
 
+
 func (c *ChartFile) GetBPMAtTick(tick uint32) float64 {
 	var currentBPM uint32 = 120000 // Default 120 BPM * 1000
 
