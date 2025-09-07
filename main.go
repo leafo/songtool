@@ -53,17 +53,29 @@ func main() {
 
 		defer sngFile.Close()
 
-		// load the midi file in it
-
-		midiData, err := sngFile.ReadFile("notes.mid")
-
-		if err != nil {
-			log.Printf("No MIDI file found in SNG package\n")
-		} else {
+		// try to load midi file
+		midiData, midiErr := sngFile.ReadFile("notes.mid")
+		if midiErr == nil {
 			midiFile, err = smf.ReadFrom(bytes.NewReader(midiData))
 			if err != nil {
 				log.Printf("Error reading MIDI data: %v\n", err)
 			}
+		}
+
+		// try to load chart file
+		chartData, chartErr := sngFile.ReadFile("notes.chart")
+		if chartErr == nil {
+			chartFile, err = ParseChartFile(bytes.NewReader(chartData))
+			if err != nil {
+				log.Printf("Error reading chart data: %v\n", err)
+			} else {
+				chartFile.Filename = "notes.chart"
+			}
+		}
+
+		// warn if neither file was found
+		if midiErr != nil && chartErr != nil {
+			log.Printf("No MIDI or chart file found in SNG package\n")
 		}
 	} else if ext == ".chart" {
 		// treat the file as a chart file
