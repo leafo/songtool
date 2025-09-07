@@ -192,21 +192,13 @@ func main() {
 			fmt.Print(timeline.String())
 		}
 	} else if *exportToneLib {
-		if midiFile == nil {
-			log.Printf("No MIDI data available for ToneLib export\n")
-			os.Exit(1)
-		}
-		exportToToneLib(midiFile, sngFile, filename)
+		exportToToneLib(song, filename)
 	} else if *createToneLibSong {
-		if midiFile == nil {
-			log.Printf("No MIDI data available for ToneLib song creation\n")
-			os.Exit(1)
-		}
 		outputFile := flag.Arg(1)
 		if outputFile == "" {
 			outputFile = "output.song"
 		}
-		createToneLibSongFile(midiFile, sngFile, outputFile)
+		createToneLibSongFile(song, outputFile)
 	} else if *extractFile != "" {
 		if sngFile == nil {
 			log.Printf("File extraction only supported for SNG files\n")
@@ -487,8 +479,8 @@ func printSngFile(sngFile *SngFile, jsonOutput bool) {
 	fmt.Println()
 }
 
-// exportToToneLib exports MIDI/SNG data to ToneLib the_song.dat XML format
-func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
+// exportToToneLib exports song data to ToneLib the_song.dat XML format
+func exportToToneLib(song SongInterface, filename string) {
 	var writer io.Writer
 	outputFile := flag.Arg(1)
 	if outputFile != "" {
@@ -503,14 +495,6 @@ func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
 		writer = os.Stdout
 	}
 
-	// Determine which song interface to use - prefer SNG over MIDI
-	var song SongInterface
-	if sngFile != nil {
-		song = sngFile
-	} else {
-		song = &MidiFile{SMF: midiFile}
-	}
-
 	err := WriteToneLibXMLTo(writer, song)
 	if err != nil {
 		log.Printf("Error exporting to ToneLib: %v\n", err)
@@ -519,7 +503,7 @@ func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
 }
 
 // createToneLibSongFile creates a complete ToneLib .song ZIP archive
-func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile string) {
+func createToneLibSongFile(song SongInterface, outputFile string) {
 	fmt.Printf("Creating ToneLib song file: %s\n", outputFile)
 
 	file, err := os.Create(outputFile)
@@ -528,14 +512,6 @@ func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile strin
 		return
 	}
 	defer file.Close()
-
-	// Determine which song interface to use - prefer SNG over MIDI
-	var song SongInterface
-	if sngFile != nil {
-		song = sngFile
-	} else {
-		song = &MidiFile{SMF: midiFile}
-	}
 
 	err = WriteToneLibSongTo(file, song)
 	if err != nil {

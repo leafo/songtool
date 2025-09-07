@@ -918,27 +918,17 @@ func writeToneLibXMLToZip(zipWriter *zip.Writer, song SongInterface,
 }
 
 // createToneLibInfo extracts metadata and creates the ToneLib info section
-func createToneLibInfo(midiFile *smf.SMF, sngFile *SngFile) ToneLibInfo {
+func createToneLibInfo(song SongInterface) ToneLibInfo {
 	info := ToneLibInfo{
 		ShowRemarks: "no",
 	}
 
-	if sngFile != nil {
-		metadata := sngFile.GetMetadata()
-		info.Name = metadata["name"]
-		info.Artist = metadata["artist"]
-		info.Album = metadata["album"]
-		info.Author = metadata["author"]
-		info.Writer = metadata["writer"]
-	} else {
-		// Use track 0 name as song title if no SNG metadata
-		if len(midiFile.Tracks) > 0 {
-			trackName := getTrackName(midiFile.Tracks[0])
-			if trackName != "" {
-				info.Name = trackName
-			}
-		}
-	}
+	metadata := song.GetMetadata()
+	info.Name = metadata["name"]
+	info.Artist = metadata["artist"]
+	info.Album = metadata["album"]
+	info.Author = metadata["author"]
+	info.Writer = metadata["writer"]
 
 	return info
 }
@@ -954,8 +944,8 @@ func createToneLibBarIndex(song SongInterface) (ToneLibBarIndex, *Timeline, erro
 	return barIndex, timeline, nil
 }
 
-// createBackingTrackIfNeeded creates backing track if SNG has audio files
-func createBackingTrackIfNeeded(sngFile *SngFile) *ToneLibBackingTrack {
+// createBackingTrack creates backing track if SNG has audio files
+func createBackingTrack(sngFile *SngFile) *ToneLibBackingTrack {
 	if sngFile == nil {
 		return nil
 	}
@@ -1016,26 +1006,12 @@ func createBackingTrackIfNeeded(sngFile *SngFile) *ToneLibBackingTrack {
 }
 
 // createToneLibScore creates a complete ToneLib score from MIDI and SNG data
-// TODO: in the future this will take a SongInterface instead of a SMF
 func createToneLibScore(song SongInterface) *ToneLibScore {
 	// Create the base score structure
 	score := &ToneLibScore{}
 
-	// 1. Extract and set metadata using type switch
-	switch s := song.(type) {
-	case *MidiFile:
-		score.Info = createToneLibInfo(s.SMF, nil)
-	case *SngFile:
-		// For SNG files, we need to extract MIDI for track creation
-		midiData, err := s.ReadFile("notes.mid")
-		if err == nil {
-			if smfData, err := smf.ReadFrom(bytes.NewReader(midiData)); err == nil {
-				score.Info = createToneLibInfo(smfData, s)
-			}
-		}
-	case *ChartFile:
-		score.Info = createToneLibInfo(nil, nil) // No MIDI/SNG metadata
-	}
+	// 1. Extract and set metadata from song interface
+	score.Info = createToneLibInfo(song)
 
 	// 2. Create bar index and extract timeline
 	barIndex, timeline, _ := createToneLibBarIndex(song)
@@ -1062,7 +1038,7 @@ func createToneLibScore(song SongInterface) *ToneLibScore {
 	// 4. Add backing track if needed (SNG-specific)
 	switch s := song.(type) {
 	case *SngFile:
-		score.BackingTrack = createBackingTrackIfNeeded(s)
+		score.BackingTrack = createBackingTrack(s)
 	default:
 		score.BackingTrack = nil
 	}

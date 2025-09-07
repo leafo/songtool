@@ -324,8 +324,8 @@ func (s *SngFile) unmaskData(maskedData []byte) []byte {
 //   - "song_length" - Duration in milliseconds
 //   - "diff_guitar", "diff_bass", etc. - Difficulty ratings (0-7)
 //   - "preview_start_time" - Preview start time in milliseconds
-func (s *SngFile) GetMetadata() SngMetadata {
-	result := make(SngMetadata)
+func (s *SngFile) GetMetadata() map[string]string {
+	result := make(map[string]string)
 	for k, v := range s.Metadata {
 		result[k] = v
 	}

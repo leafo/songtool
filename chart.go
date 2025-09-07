@@ -676,7 +676,6 @@ func unquoteString(s string) string {
 	return result.String()
 }
 
-
 func (c *ChartFile) GetBPMAtTick(tick uint32) float64 {
 	var currentBPM uint32 = 120000 // Default 120 BPM * 1000
 
@@ -694,6 +693,31 @@ func (c *ChartFile) GetBPMAtTick(tick uint32) float64 {
 	}
 
 	return float64(currentBPM) / 1000.0 // Convert from BPM*1000 to actual BPM
+}
+
+func (c *ChartFile) GetMetadata() map[string]string {
+	result := make(map[string]string)
+
+	if c.Song.Name != "" {
+		result["name"] = c.Song.Name
+	}
+	if c.Song.Artist != "" {
+		result["artist"] = c.Song.Artist
+	}
+	if c.Song.Album != "" {
+		result["album"] = c.Song.Album
+	}
+	if c.Song.Charter != "" {
+		result["charter"] = c.Song.Charter
+	}
+	if c.Song.Year != "" {
+		result["year"] = c.Song.Year
+	}
+	if c.Song.Genre != "" {
+		result["genre"] = c.Song.Genre
+	}
+
+	return result
 }
 
 func (c *ChartFile) String() string {
