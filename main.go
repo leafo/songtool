@@ -37,8 +37,8 @@ func main() {
 	filename := flag.Arg(0)
 
 	var song SongInterface
-	var sngFile *SngFile  // Keep for SNG-specific operations
-	var midiFile *smf.SMF // Keep for MIDI-specific operations
+	var sngFile *SngFile     // Keep for SNG-specific operations
+	var midiFile *smf.SMF    // Keep for MIDI-specific operations
 	var chartFile *ChartFile // Keep for chart-specific operations
 	var err error
 
@@ -489,11 +489,6 @@ func printSngFile(sngFile *SngFile, jsonOutput bool) {
 
 // exportToToneLib exports MIDI/SNG data to ToneLib the_song.dat XML format
 func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
-	// Generate beat map from timeline data
-	midiFileWrapper := &MidiFile{SMF: midiFile}
-	timeline, _ := midiFileWrapper.GetTimeline()
-	beatMap := generateBeatsFromTimeline(timeline)
-
 	var writer io.Writer
 	outputFile := flag.Arg(1)
 	if outputFile != "" {
@@ -508,7 +503,15 @@ func exportToToneLib(midiFile *smf.SMF, sngFile *SngFile, filename string) {
 		writer = os.Stdout
 	}
 
-	err := WriteToneLibXMLTo(writer, midiFile, sngFile, beatMap)
+	// Determine which song interface to use - prefer SNG over MIDI
+	var song SongInterface
+	if sngFile != nil {
+		song = sngFile
+	} else {
+		song = &MidiFile{SMF: midiFile}
+	}
+
+	err := WriteToneLibXMLTo(writer, song)
 	if err != nil {
 		log.Printf("Error exporting to ToneLib: %v\n", err)
 		return
@@ -526,7 +529,15 @@ func createToneLibSongFile(midiFile *smf.SMF, sngFile *SngFile, outputFile strin
 	}
 	defer file.Close()
 
-	err = WriteToneLibSongTo(file, midiFile, sngFile)
+	// Determine which song interface to use - prefer SNG over MIDI
+	var song SongInterface
+	if sngFile != nil {
+		song = sngFile
+	} else {
+		song = &MidiFile{SMF: midiFile}
+	}
+
+	err = WriteToneLibSongTo(file, song)
 	if err != nil {
 		log.Printf("Error creating ToneLib song file: %v\n", err)
 		return

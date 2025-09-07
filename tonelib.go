@@ -453,8 +453,9 @@ func (b ToneLibBackingBars) MarshalXML(e *xml.Encoder, start xml.StartElement) e
 }
 
 // WriteToneLibXMLTo writes a MIDI file as ToneLib the_song.dat XML format to the writer
-func WriteToneLibXMLTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) error {
-	score := createToneLibScore(midiFile, sngFile, beatMap)
+func WriteToneLibXMLTo(writer io.Writer, song SongInterface) error {
+
+	score := createToneLibScore(song)
 	return writeScoreXML(score, writer)
 }
 
@@ -778,7 +779,7 @@ func createZipEntryWithCurrentTime(w *zip.Writer, name string) (io.Writer, error
 }
 
 // Generate and write a complete ToneLib .song ZIP archive to the writer
-func WriteToneLibSongTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile) error {
+func WriteToneLibSongTo(writer io.Writer, song SongInterface) error {
 	zipWriter := zip.NewWriter(writer)
 	defer zipWriter.Close()
 
@@ -787,25 +788,25 @@ func WriteToneLibSongTo(writer io.Writer, midiFile *smf.SMF, sngFile *SngFile) e
 		return err
 	}
 
-	// 2. Process and add audio to ZIP
-	audioResult, err := processAudioForZip(zipWriter, sngFile)
-	if err != nil {
-		return err
-	}
-	if audioResult != nil {
-		defer audioResult.MergedAudio.Close()
+	// 2. Process and add audio to ZIP (SNG-specific operation)
+	var audioResult *AudioProcessingResult
+	var err error
+	switch s := song.(type) {
+	case *SngFile:
+		audioResult, err = processAudioForZip(zipWriter, s)
+		if err != nil {
+			return err
+		}
+		if audioResult != nil {
+			defer audioResult.MergedAudio.Close()
+		}
+	case *MidiFile, *ChartFile:
+		// No audio processing for MIDI/Chart files
+		audioResult = nil
 	}
 
-	// 3. Generate beats from timeline
-	timeline, err := (&MidiFile{midiFile}).GetTimeline()
-	if err != nil {
-		return fmt.Errorf("failed to get timeline: %w", err)
-	}
-
-	beatMap := generateBeatsFromTimeline(timeline)
-
-	// 4. Create and write the_song.dat XML
-	if err := writeToneLibXMLToZip(zipWriter, midiFile, sngFile, beatMap, audioResult); err != nil {
+	// 3. Create and write the_song.dat XML
+	if err := writeToneLibXMLToZip(zipWriter, song, audioResult); err != nil {
 		return err
 	}
 
@@ -895,11 +896,11 @@ func generateBeatsFromTimeline(timeline *Timeline) *BeatMap {
 }
 
 // writeToneLibXMLToZip creates and writes the_song.dat XML file to the ZIP
-func writeToneLibXMLToZip(zipWriter *zip.Writer, midiFile *smf.SMF, sngFile *SngFile,
-	beatMap *BeatMap, audioResult *AudioProcessingResult) error {
+func writeToneLibXMLToZip(zipWriter *zip.Writer, song SongInterface,
+	audioResult *AudioProcessingResult) error {
 
 	// Create the score with audio metadata if available
-	score := createToneLibScore(midiFile, sngFile, beatMap)
+	score := createToneLibScore(song)
 	if score.BackingTrack != nil && audioResult != nil {
 		score.BackingTrack.Audio.DataLen = audioResult.ConvertedAudioLen
 	}
@@ -954,7 +955,7 @@ func createToneLibBarIndex(song SongInterface) (ToneLibBarIndex, *Timeline, erro
 }
 
 // createBackingTrackIfNeeded creates backing track if SNG has audio files
-func createBackingTrackIfNeeded(sngFile *SngFile, beatMap *BeatMap) *ToneLibBackingTrack {
+func createBackingTrackIfNeeded(sngFile *SngFile) *ToneLibBackingTrack {
 	if sngFile == nil {
 		return nil
 	}
@@ -971,6 +972,13 @@ func createBackingTrackIfNeeded(sngFile *SngFile, beatMap *BeatMap) *ToneLibBack
 
 	if !hasOpusFiles {
 		return nil
+	}
+
+	// Generate beatMap from SNG file's timeline
+	timeline, err := sngFile.GetTimeline()
+	var beatMap *BeatMap
+	if err == nil {
+		beatMap = generateBeatsFromTimeline(timeline)
 	}
 
 	// Create bars structure with beat map data if available
@@ -1009,25 +1017,55 @@ func createBackingTrackIfNeeded(sngFile *SngFile, beatMap *BeatMap) *ToneLibBack
 
 // createToneLibScore creates a complete ToneLib score from MIDI and SNG data
 // TODO: in the future this will take a SongInterface instead of a SMF
-func createToneLibScore(midiFile *smf.SMF, sngFile *SngFile, beatMap *BeatMap) *ToneLibScore {
-	songInterface := &MidiFile{midiFile}
-
+func createToneLibScore(song SongInterface) *ToneLibScore {
 	// Create the base score structure
 	score := &ToneLibScore{}
 
-	// 1. Extract and set metadata
-	score.Info = createToneLibInfo(midiFile, sngFile)
+	// 1. Extract and set metadata using type switch
+	switch s := song.(type) {
+	case *MidiFile:
+		score.Info = createToneLibInfo(s.SMF, nil)
+	case *SngFile:
+		// For SNG files, we need to extract MIDI for track creation
+		midiData, err := s.ReadFile("notes.mid")
+		if err == nil {
+			if smfData, err := smf.ReadFrom(bytes.NewReader(midiData)); err == nil {
+				score.Info = createToneLibInfo(smfData, s)
+			}
+		}
+	case *ChartFile:
+		score.Info = createToneLibInfo(nil, nil) // No MIDI/SNG metadata
+	}
 
 	// 2. Create bar index and extract timeline
-	barIndex, timeline, _ := createToneLibBarIndex(songInterface)
+	barIndex, timeline, _ := createToneLibBarIndex(song)
 	score.BarIndex = barIndex
 
-	// 3. Create tracks from MIDI - ensure bar count matches BarIndex
+	// 3. Create tracks using type switch
 	numBars := len(score.BarIndex.Bars)
-	score.Tracks = createTracksFromMidi(midiFile, numBars, timeline)
+	switch s := song.(type) {
+	case *MidiFile:
+		score.Tracks = createTracksFromMidi(s.SMF, numBars, timeline)
+	case *SngFile:
+		// For SNG files, extract MIDI and create tracks
+		midiData, err := s.ReadFile("notes.mid")
+		if err == nil {
+			if smfData, err := smf.ReadFrom(bytes.NewReader(midiData)); err == nil {
+				score.Tracks = createTracksFromMidi(smfData, numBars, timeline)
+			}
+		}
+	case *ChartFile:
+		// Chart files don't have MIDI tracks to convert
+		score.Tracks = ToneLibTracks{}
+	}
 
-	// 4. Add backing track if needed
-	score.BackingTrack = createBackingTrackIfNeeded(sngFile, beatMap)
+	// 4. Add backing track if needed (SNG-specific)
+	switch s := song.(type) {
+	case *SngFile:
+		score.BackingTrack = createBackingTrackIfNeeded(s)
+	default:
+		score.BackingTrack = nil
+	}
 
 	return score
 }
