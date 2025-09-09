@@ -139,6 +139,195 @@ func createMidiTrack(trackInfo TrackInfo) smf.Track {
 	return track
 }
 
+// AddChartDrumTracks extracts drums from a Chart file and adds them as GM drums to the exporter
+func (e *GeneralMidiExporter) AddChartDrumTracks(chartFile *ChartFile) error {
+	if chartFile == nil {
+		return fmt.Errorf("chart file is nil")
+	}
+
+	// Find highest difficulty drum track available
+	var drumTrack *TrackSection
+	var trackName string
+
+	difficulties := []string{"ExpertDrums", "HardDrums", "MediumDrums", "EasyDrums"}
+	for _, diff := range difficulties {
+		if track, exists := chartFile.Tracks[diff]; exists && len(track.Notes) > 0 {
+			drumTrack = &track
+			trackName = diff
+			break
+		}
+	}
+
+	if drumTrack == nil {
+		return fmt.Errorf("no drum tracks found in chart file")
+	}
+
+	log.Printf("Found %s track with %d notes", trackName, len(drumTrack.Notes))
+
+	// Convert chart drum notes to MIDI events
+	var events []MidiEvent
+
+	for _, note := range drumTrack.Notes {
+		// Convert chart fret to MIDI key
+		midiKey, err := chartFretToMidiKey(note.Fret)
+		if err != nil {
+			log.Printf("Warning: Could not convert chart fret %d: %v", note.Fret, err)
+			continue
+		}
+
+		// Convert to GM drum key
+		gmKey, err := midiKeyToGMKey(midiKey)
+		if err != nil {
+			log.Printf("Warning: Could not convert MIDI key %d to GM: %v", midiKey, err)
+			continue
+		}
+
+		// Calculate absolute time in ticks
+		absoluteTime := tickFromChart(chartFile, note.Tick)
+
+		// Use reasonable velocity (chart files don't have velocity info)
+		velocity := uint8(100)
+
+		// Add Note On event
+		noteOnMsg := smf.Message(midi.NoteOn(gmDrumChannel, gmKey, velocity))
+		events = append(events, MidiEvent{Time: absoluteTime, Message: noteOnMsg})
+
+		// Calculate note duration
+		endTime := absoluteTime + hitDurationTicks
+
+		// If this is a sustained note, use the sustain length
+		if note.Sustain > 0 {
+			sustainTicks := tickFromChart(chartFile, note.Sustain)
+			endTime = absoluteTime + sustainTicks
+		}
+
+		// Add Note Off event
+		noteOffMsg := smf.Message(midi.NoteOff(gmDrumChannel, gmKey))
+		events = append(events, MidiEvent{Time: endTime, Message: noteOffMsg})
+	}
+
+	if len(events) == 0 {
+		return fmt.Errorf("no valid drum events found")
+	}
+
+	// Add drum track to exporter
+	drumTrackInfo := TrackInfo{
+		Name:    "Drums",
+		Channel: gmDrumChannel,
+		Program: 0, // Drums don't use program change (channel 9)
+		Events:  events,
+	}
+
+	log.Printf("Generated %d MIDI events from chart drums", len(events))
+	return e.addTrack(drumTrackInfo)
+}
+
+// chartFretToMidiKey converts chart fret numbers to equivalent MIDI keys
+func chartFretToMidiKey(fret uint8) (uint8, error) {
+	// Chart drum frets map to MIDI keys like this:
+	// Fret 0 = Kick = MIDI key 96 (C6)
+	// Fret 1 = Red/Snare = MIDI key 97 (C#6)
+	// Fret 2 = Yellow/Hi-Hat = MIDI key 98 (D6)
+	// Fret 3 = Blue/Ride = MIDI key 99 (D#6)
+	// Fret 4 = Orange/Crash = MIDI key 100 (E6)
+
+	switch fret {
+	case 0:
+		return 96, nil // Kick
+	case 1:
+		return 97, nil // Snare
+	case 2:
+		return 98, nil // Hi-Hat
+	case 3:
+		return 99, nil // Ride
+	case 4:
+		return 100, nil // Crash
+	case 7: // Open note (kick variant)
+		return 96, nil
+	default:
+		return 0, fmt.Errorf("unsupported drum fret: %d", fret)
+	}
+}
+
+// midiKeyToGMKey converts Rock Band MIDI keys to GM drum keys
+func midiKeyToGMKey(midiKey uint8) (uint8, error) {
+	gmKey, exists := gmDrumMap[midiKey]
+	if !exists {
+		return 0, fmt.Errorf("no GM mapping for MIDI key %d", midiKey)
+	}
+	return gmKey, nil
+}
+
+// tickFromChart converts chart ticks to absolute ticks (accounting for resolution differences)
+func tickFromChart(chart *ChartFile, chartTick uint32) uint32 {
+	// Chart files use their own resolution (typically 192 ticks per quarter note)
+	// We need to convert to our target resolution (typically 480 for MIDI export)
+	// For now, return the raw tick value - this assumes both use same resolution
+	// TODO: Add proper resolution conversion if needed
+	return chartTick
+}
+
+// SetupTimingTrackFromChart creates timing track from Chart file tempo/time signature data
+func (e *GeneralMidiExporter) SetupTimingTrackFromChart(chartFile *ChartFile) error {
+	if chartFile == nil {
+		return fmt.Errorf("chart file is nil")
+	}
+
+	// Set MIDI resolution to match chart
+	ticksPerQuarter := smf.MetricTicks(chartFile.Song.Resolution)
+	e.smf.TimeFormat = ticksPerQuarter
+
+	tempoTrack := smf.Track{}
+
+	// Add tempo events from chart
+	for _, bpmEvent := range chartFile.SyncTrack.BPMEvents {
+		bpm := float64(bpmEvent.BPM) / 1000.0 // Chart stores BPM * 1000
+		tempoMsg := smf.Message(smf.MetaTempo(bpm))
+		tempoTrack = append(tempoTrack, smf.Event{Delta: bpmEvent.Tick, Message: tempoMsg})
+	}
+
+	// Add time signature events from chart
+	for _, tsEvent := range chartFile.SyncTrack.TimeSigEvents {
+		denominator := uint8(1 << tsEvent.Denominator) // Convert from log2 to actual value
+		timeSigMsg := smf.Message(smf.MetaTimeSig(tsEvent.Numerator, denominator, 24, 8))
+		tempoTrack = append(tempoTrack, smf.Event{Delta: tsEvent.Tick, Message: timeSigMsg})
+	}
+
+	// If no tempo events, add default
+	if len(chartFile.SyncTrack.BPMEvents) == 0 {
+		log.Println("Warning: No tempo events found, using default 120 BPM")
+		tempoMsg := smf.Message(smf.MetaTempo(120.0))
+		tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: tempoMsg})
+	}
+
+	// Add track name
+	trackNameMsg := smf.Message(smf.MetaTrackSequenceName("Tempo"))
+	tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: trackNameMsg})
+
+	// Convert absolute deltas to relative deltas
+	tempoTrack = convertToRelativeDeltas(tempoTrack)
+
+	// Always end with End of Track
+	tempoTrack = append(tempoTrack, smf.Event{Delta: 0, Message: smf.EOT})
+
+	e.smf.Add(tempoTrack)
+	return nil
+}
+
+// convertToRelativeDeltas converts absolute delta times to relative delta times
+func convertToRelativeDeltas(track smf.Track) smf.Track {
+	var result smf.Track
+	var lastTime uint32
+
+	for _, event := range track {
+		delta := event.Delta - lastTime
+		result = append(result, smf.Event{Delta: delta, Message: event.Message})
+		lastTime = event.Delta
+	}
+
+	return result
+}
+
 // extractTempoTrack copies only essential timing events from the original MIDI file's first track
 func extractTempoTrack(smfData *smf.SMF) smf.Track {
 	tempoTrack := smf.Track{}

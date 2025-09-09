@@ -100,8 +100,8 @@ func main() {
 	}
 
 	if *exportGmDrums || *exportGmVocals || *exportGmBass || *exportGm {
-		if midiFile == nil {
-			log.Printf("No MIDI data available for export\n")
+		if midiFile == nil && chartFile == nil {
+			log.Printf("No MIDI or Chart data available for export\n")
 			os.Exit(1)
 		}
 		outputFile := flag.Arg(1)
@@ -125,33 +125,59 @@ func main() {
 		defer file.Close()
 
 		exporter := NewGeneralMidiExporter()
-		err = exporter.SetupTimingTrack(midiFile)
-		if err != nil {
-			log.Printf("Error setting up timing track: %v\n", err)
-			os.Exit(1)
+
+		// Setup timing track from available source
+		if midiFile != nil {
+			err = exporter.SetupTimingTrack(midiFile)
+			if err != nil {
+				log.Printf("Error setting up timing track from MIDI: %v\n", err)
+				os.Exit(1)
+			}
+		} else if chartFile != nil {
+			err = exporter.SetupTimingTrackFromChart(chartFile)
+			if err != nil {
+				log.Printf("Error setting up timing track from Chart: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		if *exportGmDrums || *exportGm {
-			err = exporter.AddDrumTracks(midiFile)
-			if err != nil {
-				log.Printf("Error adding drum tracks: %v\n", err)
-				os.Exit(1)
+			if midiFile != nil {
+				err = exporter.AddDrumTracks(midiFile)
+				if err != nil {
+					log.Printf("Error adding drum tracks from MIDI: %v\n", err)
+					os.Exit(1)
+				}
+			} else if chartFile != nil {
+				err = exporter.AddChartDrumTracks(chartFile)
+				if err != nil {
+					log.Printf("Error adding drum tracks from Chart: %v\n", err)
+					os.Exit(1)
+				}
 			}
 		}
 
 		if *exportGmVocals || *exportGm {
-			err = exporter.AddVocalTracks(midiFile)
-			if err != nil {
-				log.Printf("Error adding vocal tracks: %v\n", err)
-				os.Exit(1)
+			if midiFile != nil {
+				err = exporter.AddVocalTracks(midiFile)
+				if err != nil {
+					log.Printf("Error adding vocal tracks: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				log.Printf("Warning: Vocal export not supported for Chart files (Chart files contain no melodic data)")
 			}
 		}
 
 		if *exportGmBass || *exportGm {
-			err = exporter.AddBassTracks(midiFile)
-			if err != nil {
-				log.Printf("Error adding bass tracks: %v\n", err)
-				os.Exit(1)
+			if midiFile != nil {
+				err = exporter.AddBassTracks(midiFile)
+				if err != nil {
+					log.Printf("Error adding bass tracks: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				log.Printf("Warning: Bass export not supported for Chart files (Chart files contain no melodic data)")
 			}
 		}
 
