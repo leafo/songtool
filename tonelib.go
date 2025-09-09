@@ -654,6 +654,57 @@ func createBassTrackFromMidi(ctx *TrackCreationContext) *ToneLibTrack {
 	return &toneLibTrack
 }
 
+// createEmptyTrack creates a fallback empty track when no other tracks have data
+func createEmptyTrack(ctx *TrackCreationContext) ToneLibTrack {
+	// Get ticks per quarter note for timing calculations
+	ticksPerQuarter := int(480) // Default
+	if ctx.MidiFile != nil {
+		if tf, ok := ctx.MidiFile.TimeFormat.(smf.MetricTicks); ok {
+			ticksPerQuarter = int(tf)
+		}
+	}
+
+	// Create empty track with basic configuration
+	emptyTrack := ToneLibTrack{
+		Name:     "Empty",
+		Color:    "ffcccccc", // Light gray
+		Visible:  1,
+		Collapse: 0,
+		Lock:     0,
+		Solo:     0,
+		Mute:     0,
+		Opt:      0,
+		VolDB:    ToneLibDefaultVolDB,
+		Bank:     0, // Standard bank
+		Program:  1, // Acoustic piano
+		Chorus:   0,
+		Reverb:   0,
+		Phaser:   0,
+		Tremolo:  0,
+		ID:       *ctx.TrackID,
+		Offset:   ToneLibDefaultOffset,
+		Strings:  createGuitarStrings(), // Standard guitar strings
+		Bars:     createEmptyBars(ctx.NumBars, ticksPerQuarter),
+	}
+
+	*ctx.TrackID++
+	return emptyTrack
+}
+
+// createEmptyBars creates bars filled with whole rests
+func createEmptyBars(numBars int, ticksPerQuarter int) ToneLibTrackBars {
+	config := BarCreationConfig{
+		ClefValue:        ToneLibTrebleClef,
+		TicksPerQuarter:  ticksPerQuarter,
+		NumBars:          numBars,
+		NumEighthsPerBar: 8, // 8 eighth notes per 4/4 bar
+	}
+
+	// Create empty bars using existing function with empty notes
+	var emptyNotes []DrumNote // Empty slice of notes
+	return createBarsFromNotes(emptyNotes, config)
+}
+
 // Standard tuning configurations
 var (
 	DrumTuning   = []int{0, 0, 0, 0, 0, 0}       // All drums use tuning 0
@@ -1033,6 +1084,19 @@ func createToneLibScore(song SongInterface) *ToneLibScore {
 	case *ChartFile:
 		// Chart files don't have MIDI tracks to convert
 		score.Tracks = ToneLibTracks{}
+	}
+
+	// If no tracks were created, add a fallback empty track to prevent ToneLib crashes
+	if len(score.Tracks.Tracks) == 0 {
+		trackID := 1
+		ctx := &TrackCreationContext{
+			MidiFile: nil, // No MIDI file available
+			NumBars:  numBars,
+			Timeline: timeline,
+			TrackID:  &trackID,
+		}
+		emptyTrack := createEmptyTrack(ctx)
+		score.Tracks = ToneLibTracks{Tracks: []ToneLibTrack{emptyTrack}}
 	}
 
 	// 4. Add backing track if needed (SNG-specific)
