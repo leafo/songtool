@@ -106,3 +106,29 @@ func extractLyrics(track smf.Track) string {
 
 	return parseRockBandLyrics(lyrics)
 }
+
+// extractChartLyrics extracts all lyric events from a Chart file and joins them into a single string.
+// It looks for GlobalEvents with "lyric " prefix, then processes them through parseRockBandLyrics
+// to handle Rock Band vocal formatting consistently with MIDI lyrics.
+func extractChartLyrics(chart *ChartFile) string {
+	if chart == nil {
+		return ""
+	}
+
+	var lyrics []string
+
+	for _, event := range chart.Events.GlobalEvents {
+		// Look for events that start with "lyric "
+		if strings.HasPrefix(event.Text, "lyric ") {
+			// Extract the lyric text after "lyric " prefix
+			lyricText := strings.TrimPrefix(event.Text, "lyric ")
+			lyricText = strings.TrimSpace(lyricText)
+
+			if lyricText != "" {
+				lyrics = append(lyrics, lyricText)
+			}
+		}
+	}
+
+	return parseRockBandLyrics(lyrics)
+}

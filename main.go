@@ -650,6 +650,14 @@ func printChartInfo(chart *ChartFile, jsonOutput bool, filterTrack string) {
 	if sectionCount > 0 {
 		fmt.Printf("  Sections: %d\n", sectionCount)
 	}
+
+	// Extract and display full lyrics (similar to MIDI files)
+	if lyricCount > 0 {
+		fullLyrics := extractChartLyrics(chart)
+		if fullLyrics != "" {
+			fmt.Printf("  Full Lyrics: %s\n", fullLyrics)
+		}
+	}
 	fmt.Println()
 
 	// Track info
