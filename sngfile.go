@@ -339,7 +339,7 @@ func (s *SngFile) GetMergedAudio() (*MergedAudio, error) {
 	var opusFiles []string
 	files := s.ListFiles()
 	for _, filename := range files {
-		if strings.HasSuffix(filename, ".opus") {
+		if strings.HasSuffix(filename, ".opus") && !strings.Contains(strings.ToLower(filename), "preview") {
 			opusFiles = append(opusFiles, filename)
 		}
 	}
