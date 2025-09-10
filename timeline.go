@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
 )
@@ -582,6 +583,45 @@ func (c *ChartFile) GetTimeline() (*Timeline, error) {
 	return timeline, nil
 }
 
+// GetLyricsByMeasure extracts lyrics from Chart file and groups them by measure
+func (c *ChartFile) GetLyricsByMeasure() ([]MeasureLyrics, error) {
+	if c == nil {
+		return []MeasureLyrics{}, nil
+	}
+
+	// Get timeline for measure timing
+	timeline, err := c.GetTimeline()
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract lyric events with timing from Chart file GlobalEvents
+	var lyricEvents []LyricEvent
+	for _, event := range c.Events.GlobalEvents {
+		// Look for events that start with "lyric "
+		if strings.HasPrefix(event.Text, "lyric ") {
+			// Extract the lyric text after "lyric " prefix
+			lyricText := strings.TrimPrefix(event.Text, "lyric ")
+			lyricText = strings.TrimSpace(lyricText)
+
+			if lyricText != "" {
+				lyricEvents = append(lyricEvents, LyricEvent{
+					Time:  event.Tick,
+					Lyric: lyricText,
+				})
+			}
+		}
+	}
+
+	if len(lyricEvents) == 0 {
+		return []MeasureLyrics{}, nil
+	}
+
+	// Group lyrics by measure using existing logic from MIDI files
+	measureLyrics := groupLyricsByMeasure(lyricEvents, timeline)
+	return measureLyrics, nil
+}
+
 // GetTimeline extracts timeline information from SNG file
 func (s *SngFile) GetTimeline() (*Timeline, error) {
 	// Try to extract from MIDI file first
@@ -609,4 +649,29 @@ func (s *SngFile) GetTimeline() (*Timeline, error) {
 	}
 
 	return nil, fmt.Errorf("failed to parse timeline from SNG file")
+}
+
+// GetLyricsByMeasure extracts lyrics from SNG file and groups them by measure
+func (s *SngFile) GetLyricsByMeasure() ([]MeasureLyrics, error) {
+	// Try to extract from MIDI file first
+	midiData, midiErr := s.ReadFile("notes.mid")
+	if midiErr == nil {
+		smfData, err := smf.ReadFrom(bytes.NewReader(midiData))
+		if err == nil {
+			midiFile := &MidiFile{SMF: smfData}
+			return midiFile.GetLyricsByMeasure()
+		}
+	}
+
+	// Fall back to chart file
+	chartData, chartErr := s.ReadFile("notes.chart")
+	if chartErr == nil {
+		chartFile, err := ParseChartFile(bytes.NewReader(chartData))
+		if err == nil {
+			return chartFile.GetLyricsByMeasure()
+		}
+	}
+
+	// Return empty if neither worked
+	return []MeasureLyrics{}, nil
 }

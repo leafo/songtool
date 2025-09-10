@@ -8,6 +8,7 @@ import (
 type SongInterface interface {
 	GetTimeline() (*Timeline, error)
 	GetMetadata() map[string]string
+	GetLyricsByMeasure() ([]MeasureLyrics, error)
 }
 
 // SMF wrapper so we can implement the interface
@@ -26,4 +27,22 @@ func (m *MidiFile) GetMetadata() map[string]string {
 	}
 
 	return result
+}
+
+func (m *MidiFile) GetLyricsByMeasure() ([]MeasureLyrics, error) {
+	// Get timeline for measure timing
+	timeline, err := m.GetTimeline()
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract lyric events with timing from MIDI file
+	lyricEvents := extractLyricsWithTiming(m.SMF)
+	if len(lyricEvents) == 0 {
+		return []MeasureLyrics{}, nil
+	}
+
+	// Group lyrics by measure using existing logic
+	measureLyrics := groupLyricsByMeasure(lyricEvents, timeline)
+	return measureLyrics, nil
 }

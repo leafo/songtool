@@ -235,6 +235,35 @@ func (b BassNote) ConvertToToneLibNote() (ToneLibNote, error) {
 	}, nil
 }
 
+// ChartDrumNote represents a drum note from a Chart file
+type ChartDrumNote struct {
+	Time uint32 // Absolute time in Chart ticks
+	Fret uint8  // Chart fret number (0-4)
+}
+
+func (c ChartDrumNote) GetTime() uint32 {
+	return c.Time
+}
+
+func (c ChartDrumNote) ConvertToToneLibNote() (ToneLibNote, error) {
+	// Convert Chart fret to MIDI key
+	midiKey, err := chartFretToMidiKey(c.Fret)
+	if err != nil {
+		return ToneLibNote{}, err
+	}
+
+	// Convert MIDI key to GM key
+	gmKey, err := midiKeyToGMKey(midiKey)
+	if err != nil {
+		return ToneLibNote{}, err
+	}
+
+	return ToneLibNote{
+		Fret:   int(gmKey),
+		String: 1, // Will be assigned by the caller for visual separation
+	}, nil
+}
+
 // Group a list of notes into the bars (aka measures) for tonelib export
 // 1. Groups notes by measure using timing calculations
 // 2. Creates empty bars with appropriate clef and key signature
@@ -520,8 +549,10 @@ func createTracksFromMidi(midiFile *smf.SMF, numBars int, timeline *Timeline) To
 	}
 
 	// Create tracks in order: lyrics, drums, bass
-	if lyricsTrack := createLyricsTrackFromMidi(ctx); lyricsTrack != nil {
+	midiFileWrapper := &MidiFile{SMF: midiFile}
+	if lyricsTrack := createLyricsTrack(midiFileWrapper, numBars, trackID, timeline); lyricsTrack != nil {
 		tracks = append(tracks, *lyricsTrack)
+		trackID++
 	}
 
 	if bassTrack := createBassTrackFromMidi(ctx); bassTrack != nil {
@@ -535,22 +566,23 @@ func createTracksFromMidi(midiFile *smf.SMF, numBars int, timeline *Timeline) To
 	return ToneLibTracks{Tracks: tracks}
 }
 
-// createLyricsTrackFromMidi extracts and creates a lyrics track if available
-func createLyricsTrackFromMidi(ctx *TrackCreationContext) *ToneLibTrack {
-	lyricEvents := extractLyricsWithTiming(ctx.MidiFile)
-	if len(lyricEvents) == 0 || ctx.Timeline == nil {
-		return nil
+// createTracksFromChart creates ToneLib tracks from Chart file data
+func createTracksFromChart(chartFile *ChartFile, numBars int, timeline *Timeline) ToneLibTracks {
+	var tracks []ToneLibTrack
+	trackID := 1
+
+	// Create tracks in order: lyrics, drums
+	if lyricsTrack := createLyricsTrack(chartFile, numBars, trackID, timeline); lyricsTrack != nil {
+		tracks = append(tracks, *lyricsTrack)
+		trackID++
 	}
 
-	measureLyrics := groupLyricsByMeasure(lyricEvents, ctx.Timeline)
-	if len(measureLyrics) == 0 {
-		return nil
+	if drumTrack := createDrumTrackFromChart(chartFile, numBars, trackID); drumTrack != nil {
+		tracks = append(tracks, *drumTrack)
+		trackID++
 	}
 
-	lyricsTrack := createLyricsTrack(measureLyrics, ctx.MidiFile, ctx.NumBars, *ctx.TrackID, ctx.Timeline)
-	*ctx.TrackID++
-	log.Printf("Created lyrics track with %d measures containing lyrics", len(measureLyrics))
-	return &lyricsTrack
+	return ToneLibTracks{Tracks: tracks}
 }
 
 // createDrumTrackFromMidi extracts and creates a drum track if available
@@ -652,6 +684,120 @@ func createBassTrackFromMidi(ctx *TrackCreationContext) *ToneLibTrack {
 
 	*ctx.TrackID++
 	return &toneLibTrack
+}
+
+// createDrumTrackFromChart extracts and creates a drum track from Chart file
+func createDrumTrackFromChart(chartFile *ChartFile, numBars int, trackID int) *ToneLibTrack {
+	if chartFile == nil {
+		return nil
+	}
+
+	// Find highest difficulty drum track available
+	var drumTrack *TrackSection
+	var trackName string
+
+	difficulties := []string{"ExpertDrums", "HardDrums", "MediumDrums", "EasyDrums"}
+	for _, diff := range difficulties {
+		if track, exists := chartFile.Tracks[diff]; exists && len(track.Notes) > 0 {
+			drumTrack = &track
+			trackName = diff
+			break
+		}
+	}
+
+	if drumTrack == nil {
+		return nil
+	}
+
+	log.Printf("Found %s track with %d notes for ToneLib export", trackName, len(drumTrack.Notes))
+
+	// Convert chart notes to ChartDrumNote format
+	var chartDrumNotes []ChartDrumNote
+	for _, note := range drumTrack.Notes {
+		chartDrumNotes = append(chartDrumNotes, ChartDrumNote{
+			Time: note.Tick,
+			Fret: uint8(note.Fret),
+		})
+	}
+
+	if len(chartDrumNotes) == 0 {
+		return nil
+	}
+
+	// Get resolution from chart for timing calculations
+	ticksPerQuarter := chartFile.Song.Resolution
+	if ticksPerQuarter <= 0 {
+		ticksPerQuarter = 192 // Default Chart resolution
+	}
+
+	toneLibTrack := ToneLibTrack{
+		Name:     "Drum",
+		Color:    ToneLibDrumColor,
+		Visible:  1,
+		Collapse: 0,
+		Lock:     0,
+		Solo:     0,
+		Mute:     0,
+		Opt:      0,
+		VolDB:    ToneLibDefaultVolDB,
+		Bank:     128, // Percussion bank
+		Program:  0,   // Standard drum kit
+		Chorus:   0,
+		Reverb:   0,
+		Phaser:   0,
+		Tremolo:  0,
+		ID:       trackID,
+		Offset:   ToneLibDefaultOffset,
+		Strings:  createDrumStrings(),
+		Bars:     createDrumBarsFromChart(chartDrumNotes, ticksPerQuarter, numBars),
+	}
+
+	return &toneLibTrack
+}
+
+// createLyricsTrack creates a generic lyrics track from any SongInterface
+func createLyricsTrack(song SongInterface, numBars int, trackID int, timeline *Timeline) *ToneLibTrack {
+	// Use the generic interface to get lyrics grouped by measure
+	measureLyrics, err := song.GetLyricsByMeasure()
+	if err != nil || len(measureLyrics) == 0 {
+		return nil
+	}
+
+	toneLibTrack := ToneLibTrack{
+		Name:     "Lyrics",
+		Color:    ToneLibLyricsColor,
+		Visible:  1,
+		Collapse: 0,
+		Lock:     0,
+		Solo:     0,
+		Mute:     0,
+		Opt:      0,
+		VolDB:    ToneLibDefaultVolDB,
+		Bank:     0, // Standard bank
+		Program:  1, // Acoustic piano
+		Chorus:   0,
+		Reverb:   0,
+		Phaser:   0,
+		Tremolo:  0,
+		ID:       trackID,
+		Offset:   ToneLibDefaultOffset,
+		Strings:  createGuitarStrings(), // no notes are used here, use standard tuning
+		Bars:     createLyricsBarsFromMeasures(measureLyrics, numBars, timeline),
+	}
+
+	return &toneLibTrack
+}
+
+// createDrumBarsFromChart converts Chart drum notes to ToneLib bars
+func createDrumBarsFromChart(drumNotes []ChartDrumNote, ticksPerQuarter int, numBars int) ToneLibTrackBars {
+	config := BarCreationConfig{
+		ClefValue:        ToneLibPercussionClef,
+		TicksPerQuarter:  ticksPerQuarter,
+		NumBars:          numBars,
+		NumEighthsPerBar: 8, // 8 eighth notes per 4/4 bar
+	}
+
+	return createBarsFromNotes(drumNotes, config)
 }
 
 // createEmptyTrack creates a fallback empty track when no other tracks have data
@@ -1080,10 +1226,18 @@ func createToneLibScore(song SongInterface) *ToneLibScore {
 			if smfData, err := smf.ReadFrom(bytes.NewReader(midiData)); err == nil {
 				score.Tracks = createTracksFromMidi(smfData, numBars, timeline)
 			}
+		} else {
+			// Try chart file if MIDI is not available
+			chartData, chartErr := s.ReadFile("notes.chart")
+			if chartErr == nil {
+				if chartFile, err := ParseChartFile(bytes.NewReader(chartData)); err == nil {
+					score.Tracks = createTracksFromChart(chartFile, numBars, timeline)
+				}
+			}
 		}
 	case *ChartFile:
-		// Chart files don't have MIDI tracks to convert
-		score.Tracks = ToneLibTracks{}
+		// Chart files have drum and lyrics data to convert
+		score.Tracks = createTracksFromChart(s, numBars, timeline)
 	}
 
 	// If no tracks were created, add a fallback empty track to prevent ToneLib crashes
@@ -1228,39 +1382,12 @@ func groupLyricsByMeasure(lyricEvents []LyricEvent, timeline *Timeline) []Measur
 	return measureLyrics
 }
 
-// createLyricsTrack creates a ToneLib lyrics track from measure-grouped lyrics
-func createLyricsTrack(measureLyrics []MeasureLyrics, midiFile *smf.SMF, numBars int, trackID int, timeline *Timeline) ToneLibTrack {
-	toneLibTrack := ToneLibTrack{
-		Name:     "Lyrics",
-		Color:    ToneLibLyricsColor,
-		Visible:  1,
-		Collapse: 0,
-		Lock:     0,
-		Solo:     0,
-		Mute:     0,
-		Opt:      0,
-		VolDB:    ToneLibDefaultVolDB,
-		Bank:     0, // Standard bank
-		Program:  1, // Acoustic piano
-		Chorus:   0,
-		Reverb:   0,
-		Phaser:   0,
-		Tremolo:  0,
-		ID:       trackID,
-		Offset:   ToneLibDefaultOffset,
-		Strings:  createGuitarStrings(), // no notes are used here, use standard tuning
-		Bars:     createLyricsBarsFromMeasures(measureLyrics, midiFile, numBars, timeline),
-	}
-
-	return toneLibTrack
-}
-
 // createLyricsBarsFromMeasures converts measure-grouped lyrics to ToneLib bars
-func createLyricsBarsFromMeasures(measureLyrics []MeasureLyrics, midiFile *smf.SMF, numBars int, timeline *Timeline) ToneLibTrackBars {
+func createLyricsBarsFromMeasures(measureLyrics []MeasureLyrics, numBars int, timeline *Timeline) ToneLibTrackBars {
 	// Get ticks per quarter note for beat calculations
 	ticksPerQuarter := int(480) // Default
-	if tf, ok := midiFile.TimeFormat.(smf.MetricTicks); ok {
-		ticksPerQuarter = int(tf)
+	if timeline != nil && timeline.TicksPerBeat > 0 {
+		ticksPerQuarter = int(timeline.TicksPerBeat)
 	}
 	ticksPerEighth := ticksPerQuarter / 2
 
