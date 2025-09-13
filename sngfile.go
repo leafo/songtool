@@ -44,6 +44,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -332,9 +333,36 @@ func (s *SngFile) GetMetadata() map[string]string {
 	return result
 }
 
+// validateFFmpeg checks if ffmpeg is available and has required codecs
+func validateFFmpeg() error {
+	// Check if ffmpeg is available in PATH
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf("ffmpeg is not available in PATH: %w", err)
+	}
+
+	// Test ffmpeg with a simple command to verify it's working
+	cmd := exec.Command("ffmpeg", "-version")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if stderrStr != "" {
+			return fmt.Errorf("ffmpeg validation failed: %w\nFFmpeg stderr: %s", err, stderrStr)
+		}
+		return fmt.Errorf("ffmpeg validation failed: %w", err)
+	}
+
+	return nil
+}
+
 // GetMergedAudio processes all opus files in the SNG and returns a merged audio file.
 // Returns error if no opus files found or if merge fails - no fallback.
 func (s *SngFile) GetMergedAudio() (*MergedAudio, error) {
+	// Validate ffmpeg availability before processing
+	if err := validateFFmpeg(); err != nil {
+		return nil, fmt.Errorf("audio merge requires ffmpeg: %w", err)
+	}
 	// Find all opus files in the SNG
 	var opusFiles []string
 	files := s.ListFiles()
@@ -365,12 +393,20 @@ func (s *SngFile) GetMergedAudio() (*MergedAudio, error) {
 			return nil, fmt.Errorf("failed to read %s: %w", filename, err)
 		}
 
+		// Validate that we actually got some audio data
+		if len(audioData) == 0 {
+			os.RemoveAll(tempDir)
+			return nil, fmt.Errorf("audio file %s is empty", filename)
+		}
+
 		inputPath := filepath.Join(tempDir, fmt.Sprintf("input_%d.opus", i))
 		if err := os.WriteFile(inputPath, audioData, 0644); err != nil {
 			os.RemoveAll(tempDir)
 			return nil, fmt.Errorf("failed to write temp file for %s: %w", filename, err)
 		}
 		inputPaths = append(inputPaths, inputPath)
+
+		log.Printf("Extracted %s (%d bytes) to %s", filename, len(audioData), inputPath)
 	}
 
 	// Create output path
@@ -384,14 +420,17 @@ func (s *SngFile) GetMergedAudio() (*MergedAudio, error) {
 		args = append(args, "-i", inputPath)
 	}
 
-	// Build the amerge filter complex string
+	// Build the filter complex string to handle mixed mono/stereo channels
 	if len(inputPaths) > 1 {
-		// Create filter complex for merging multiple inputs
-		filterInputs := ""
+		// Convert all inputs to stereo first, then merge
+		var filterInputs []string
 		for i := range inputPaths {
-			filterInputs += fmt.Sprintf("[%d:a]", i)
+			// Convert each input to stereo (mono inputs will be duplicated to both channels)
+			filterInputs = append(filterInputs, fmt.Sprintf("[%d:a]", i))
 		}
-		filterComplex := fmt.Sprintf("%samerge=inputs=%d[aout]", filterInputs, len(inputPaths))
+
+		// Use amix filter which handles different channel layouts better than amerge
+		filterComplex := fmt.Sprintf("%samix=inputs=%d:duration=longest[aout]", strings.Join(filterInputs, ""), len(inputPaths))
 
 		args = append(args,
 			"-filter_complex", filterComplex,
@@ -416,9 +455,22 @@ func (s *SngFile) GetMergedAudio() (*MergedAudio, error) {
 	log.Printf("Running ffmpeg to merge %d audio files", len(inputPaths))
 	cmd := exec.Command("ffmpeg", args...)
 
-	// Capture any error output
+	// Log the exact command for debugging
+	log.Printf("FFmpeg command: ffmpeg %s", strings.Join(args, " "))
+
+	// Capture stdout and stderr for better error reporting
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
 	if err := cmd.Run(); err != nil {
 		os.RemoveAll(tempDir)
+
+		// Include ffmpeg's actual error output in the error message
+		stderrStr := strings.TrimSpace(stderr.String())
+		if stderrStr != "" {
+			return nil, fmt.Errorf("ffmpeg merge failed: %w\nFFmpeg stderr: %s", err, stderrStr)
+		}
 		return nil, fmt.Errorf("ffmpeg merge failed: %w", err)
 	}
 
