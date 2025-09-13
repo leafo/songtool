@@ -173,8 +173,7 @@ func main() {
 			if midiFile != nil {
 				err = exporter.AddBassTracks(midiFile)
 				if err != nil {
-					log.Printf("Error adding bass tracks: %v\n", err)
-					os.Exit(1)
+					log.Printf("Warning: %v", err)
 				}
 			} else {
 				log.Printf("Warning: Bass export not supported for Chart files (Chart files contain no melodic data)")
