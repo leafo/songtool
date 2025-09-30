@@ -146,6 +146,7 @@ const (
 	ToneLibEighthNoteDuration       = 8
 	ToneLibSixteenthNoteDuration    = 16
 	ToneLibThirtySecondNoteDuration = 32
+	ToneLibSixtyFourthNoteDuration  = 64
 )
 
 // ToneLib default values
@@ -314,70 +315,179 @@ func createBarsFromNotes[T MusicalNote](notes []T, config BarCreationConfig) Ton
 	return ToneLibTrackBars{Bars: bars}
 }
 
-// convertNotesToBeats converts notes in a bar to ToneLib beats with eighth note quantization
+// convertNotesToBeats converts notes in a bar to ToneLib beats with adaptive quantization
 func convertNotesToBeats[T MusicalNote](notesInBar []T, barID int, config BarCreationConfig) []ToneLibBeat {
 	if len(notesInBar) == 0 {
 		return []ToneLibBeat{{Duration: ToneLibWholeNoteDuration, Dyn: ToneLibDefaultDynamic}}
 	}
 
-	// Calculate bar start time and eighth note positions
 	barStartTime := uint32((barID - 1) * config.TicksPerQuarter * ToneLibDefaultBeatsPerMeasure)
-	ticksPerEighth := config.TicksPerQuarter / 2
+	ticksPerBar := config.TicksPerQuarter * ToneLibDefaultBeatsPerMeasure
 
-	// Group notes by eighth note position
-	eighthNotes := make(map[int][]T)
-	for _, note := range notesInBar {
-		relativeTime := int(note.GetTime() - barStartTime)
-		eighthPos := relativeTime / ticksPerEighth
-		if eighthPos >= config.NumEighthsPerBar {
-			eighthPos = config.NumEighthsPerBar - 1
-		}
-		eighthNotes[eighthPos] = append(eighthNotes[eighthPos], note)
+	subdivisions := config.NumEighthsPerBar
+	if subdivisions <= 0 {
+		subdivisions = ToneLibDefaultBeatsPerMeasure * 2 // default to eighth-note grid
 	}
 
-	// Create beats
-	var beats []ToneLibBeat
-	for eighthPos := 0; eighthPos < config.NumEighthsPerBar; eighthPos++ {
-		notes := eighthNotes[eighthPos]
+	if config.ClefValue == ToneLibPercussionClef {
+		subdivisions = determineSubdivisionForBar(notesInBar, barStartTime, ticksPerBar, subdivisions)
+	}
+
+	if subdivisions <= 0 {
+		subdivisions = ToneLibDefaultBeatsPerMeasure * 2
+	}
+
+	ticksPerSubdivision := ticksPerBar / subdivisions
+	if ticksPerSubdivision == 0 {
+		ticksPerSubdivision = 1
+	}
+
+	notePositions := make(map[int][]T)
+	for _, note := range notesInBar {
+		relativeTime := int(note.GetTime() - barStartTime)
+		if relativeTime < 0 {
+			relativeTime = 0
+		}
+
+		position := (relativeTime + ticksPerSubdivision/2) / ticksPerSubdivision
+		if position < 0 {
+			position = 0
+		} else if position >= subdivisions {
+			position = subdivisions - 1
+		}
+
+		notePositions[position] = append(notePositions[position], note)
+	}
+
+	beatDuration := durationForSubdivision(subdivisions)
+	if beatDuration == 0 {
+		beatDuration = ToneLibEighthNoteDuration
+	}
+
+	beats := make([]ToneLibBeat, 0, subdivisions)
+	for pos := 0; pos < subdivisions; pos++ {
+		notes := notePositions[pos]
+		beat := ToneLibBeat{
+			Duration: beatDuration,
+			Dyn:      ToneLibDefaultDynamic,
+		}
 
 		if len(notes) > 0 {
-			beat := ToneLibBeat{
-				Duration: ToneLibEighthNoteDuration,
-				Dyn:      ToneLibDefaultDynamic,
-				Notes:    []ToneLibNote{},
-			}
-
-			// Convert each note to ToneLib format
+			beat.Notes = make([]ToneLibNote, 0, len(notes))
 			stringID := 1
 			for _, note := range notes {
 				toneLibNote, err := note.ConvertToToneLibNote()
 				if err != nil {
-					continue // Skip invalid notes
+					continue
 				}
 
-				// For drums, assign different strings for visual separation
 				if config.ClefValue == ToneLibPercussionClef {
 					toneLibNote.String = stringID
 					stringID++
 					if stringID > 6 {
-						stringID = 1 // Wrap around
+						stringID = 1
 					}
 				}
 
 				beat.Notes = append(beat.Notes, toneLibNote)
 			}
-
-			beats = append(beats, beat)
-		} else {
-			// Create rest beat
-			beats = append(beats, ToneLibBeat{
-				Duration: ToneLibEighthNoteDuration,
-				Dyn:      ToneLibDefaultDynamic,
-			})
 		}
+
+		beats = append(beats, beat)
 	}
 
 	return beats
+}
+
+func determineSubdivisionForBar[T MusicalNote](notes []T, barStartTime uint32, ticksPerBar int, baseSubdivision int) int {
+	if baseSubdivision <= 0 {
+		baseSubdivision = ToneLibDefaultBeatsPerMeasure * 2
+	}
+
+	candidates := []int{baseSubdivision}
+	for current := baseSubdivision; current < 64; {
+		current *= 2
+		if current > 64 {
+			break
+		}
+		candidates = append(candidates, current)
+	}
+
+	maxSubdivision := baseSubdivision
+
+	for _, note := range notes {
+		offset := int(note.GetTime() - barStartTime)
+		if offset < 0 {
+			offset = 0
+		}
+
+		bestSubdivision := baseSubdivision
+		bestError := ticksPerBar
+
+		for _, candidate := range candidates {
+			if candidate <= 0 {
+				continue
+			}
+			if ticksPerBar%candidate != 0 {
+				continue
+			}
+
+			ticksPerSubdivision := ticksPerBar / candidate
+			if ticksPerSubdivision == 0 {
+				continue
+			}
+
+			position := (offset + ticksPerSubdivision/2) / ticksPerSubdivision
+			if position < 0 {
+				position = 0
+			} else if position >= candidate {
+				position = candidate - 1
+			}
+
+			quantized := position * ticksPerSubdivision
+			error := quantized - offset
+			if error < 0 {
+				error = -error
+			}
+
+			if error < bestError {
+				bestError = error
+				bestSubdivision = candidate
+			} else if error == bestError && candidate < bestSubdivision {
+				bestSubdivision = candidate
+			}
+		}
+
+		if bestSubdivision > maxSubdivision {
+			maxSubdivision = bestSubdivision
+		}
+	}
+
+	return maxSubdivision
+}
+
+func durationForSubdivision(subdivisions int) int {
+	switch subdivisions {
+	case 1:
+		return ToneLibWholeNoteDuration
+	case 2:
+		return ToneLibHalfNoteDuration
+	case 4:
+		return ToneLibQuarterNoteDuration
+	case 8:
+		return ToneLibEighthNoteDuration
+	case 16:
+		return ToneLibSixteenthNoteDuration
+	case 32:
+		return ToneLibThirtySecondNoteDuration
+	case 64:
+		return ToneLibSixtyFourthNoteDuration
+	default:
+		if subdivisions > 0 {
+			return subdivisions
+		}
+		return 0
+	}
 }
 
 type ToneLibClef struct {

@@ -146,6 +146,16 @@ func createComplexMidiFile() *smf.SMF {
 	return createMidiFileWithDrums()
 }
 
+type testDrumNote struct {
+	time uint32
+}
+
+func (n testDrumNote) GetTime() uint32 { return n.time }
+
+func (n testDrumNote) ConvertToToneLibNote() (ToneLibNote, error) {
+	return ToneLibNote{Fret: 60, String: 1}, nil
+}
+
 // Tests for createToneLibInfo
 
 func TestCreateToneLibInfo_MidiFile(t *testing.T) {
@@ -204,6 +214,82 @@ func TestCreateToneLibInfo_EmptyMetadata(t *testing.T) {
 	}
 	if info.ShowRemarks != "no" {
 		t.Errorf("Expected ShowRemarks 'no', got '%s'", info.ShowRemarks)
+	}
+}
+
+func TestConvertNotesToBeats_ExpandsToSixteenthGrid(t *testing.T) {
+	config := BarCreationConfig{
+		ClefValue:        ToneLibPercussionClef,
+		TicksPerQuarter:  480,
+		NumBars:          1,
+		NumEighthsPerBar: 8,
+	}
+
+	notes := []testDrumNote{{time: 0}, {time: 120}}
+	beats := convertNotesToBeats(notes, 1, config)
+
+	if len(beats) != 16 {
+		t.Fatalf("expected 16 beats, got %d", len(beats))
+	}
+
+	if beats[0].Duration != ToneLibSixteenthNoteDuration {
+		t.Fatalf("expected sixteenth note duration, got %d", beats[0].Duration)
+	}
+
+	if len(beats[0].Notes) != 1 {
+		t.Fatalf("expected 1 note at beat 0, got %d", len(beats[0].Notes))
+	}
+
+	if len(beats[1].Notes) != 1 {
+		t.Fatalf("expected 1 note at beat 1, got %d", len(beats[1].Notes))
+	}
+}
+
+func TestConvertNotesToBeats_ExpandsToSixtyFourthGrid(t *testing.T) {
+	config := BarCreationConfig{
+		ClefValue:        ToneLibPercussionClef,
+		TicksPerQuarter:  480,
+		NumBars:          1,
+		NumEighthsPerBar: 8,
+	}
+
+	notes := []testDrumNote{{time: 30}}
+	beats := convertNotesToBeats(notes, 1, config)
+
+	if len(beats) != 64 {
+		t.Fatalf("expected 64 beats, got %d", len(beats))
+	}
+
+	if beats[0].Duration != ToneLibSixtyFourthNoteDuration {
+		t.Fatalf("expected sixty-fourth note duration, got %d", beats[0].Duration)
+	}
+
+	if len(beats[1].Notes) != 1 {
+		t.Fatalf("expected 1 note at beat 1, got %d", len(beats[1].Notes))
+	}
+}
+
+func TestConvertNotesToBeats_PrefersLowerSubdivisionWhenErrorEqual(t *testing.T) {
+	config := BarCreationConfig{
+		ClefValue:        ToneLibPercussionClef,
+		TicksPerQuarter:  480,
+		NumBars:          1,
+		NumEighthsPerBar: 8,
+	}
+
+	notes := []testDrumNote{{time: 45}}
+	beats := convertNotesToBeats(notes, 1, config)
+
+	if len(beats) != 32 {
+		t.Fatalf("expected 32 beats, got %d", len(beats))
+	}
+
+	if beats[0].Duration != ToneLibThirtySecondNoteDuration {
+		t.Fatalf("expected thirty-second note duration, got %d", beats[0].Duration)
+	}
+
+	if len(beats[1].Notes) != 1 {
+		t.Fatalf("expected 1 note at beat 1, got %d", len(beats[1].Notes))
 	}
 }
 
