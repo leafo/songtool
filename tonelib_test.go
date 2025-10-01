@@ -156,6 +156,82 @@ func (n testDrumNote) ConvertToToneLibNote() (ToneLibNote, error) {
 	return ToneLibNote{Fret: 60, String: 1}, nil
 }
 
+func TestGroupLyricsByMeasure_SplitsSegmentsOnQuarterGaps(t *testing.T) {
+	timeline := &Timeline{
+		Measures: []Measure{
+			{StartTime: 0, EndTime: 1920, BeatsPerMeasure: 4},
+		},
+		TicksPerBeat: 480,
+	}
+
+	lyricEvents := []LyricEvent{
+		{Time: 0, Lyric: "Hel-"},
+		{Time: 120, Lyric: "lo"},
+		{Time: 600, Lyric: "world"},
+	}
+
+	measureLyrics := groupLyricsByMeasure(lyricEvents, timeline)
+	if len(measureLyrics) != 1 {
+		t.Fatalf("expected 1 measure with lyrics, got %d", len(measureLyrics))
+	}
+
+	segments := measureLyrics[0].Segments
+	if len(segments) != 2 {
+		t.Fatalf("expected 2 lyric segments, got %d", len(segments))
+	}
+
+	if segments[0].StartTime != 0 {
+		t.Fatalf("expected first segment to start at 0, got %d", segments[0].StartTime)
+	}
+	if segments[0].Text != "Hello" {
+		t.Fatalf("expected first segment text 'Hello', got '%s'", segments[0].Text)
+	}
+
+	if segments[1].StartTime != 600 {
+		t.Fatalf("expected second segment to start at 600, got %d", segments[1].StartTime)
+	}
+	if segments[1].Text != "world" {
+		t.Fatalf("expected second segment text 'world', got '%s'", segments[1].Text)
+	}
+}
+
+func TestCreateLyricsBarsFromMeasures_MultipleSegments(t *testing.T) {
+	measureLyrics := []MeasureLyrics{
+		{
+			MeasureNum: 1,
+			Segments: []LyricSegment{
+				{StartTime: 0, Text: "Hello"},
+				{StartTime: 960, Text: "World"},
+			},
+		},
+	}
+
+	timeline := &Timeline{
+		Measures: []Measure{
+			{StartTime: 0, EndTime: 1920, BeatsPerMeasure: 4},
+		},
+		TicksPerBeat: 480,
+	}
+
+	bars := createLyricsBarsFromMeasures(measureLyrics, 1, timeline)
+	if len(bars.Bars) != 1 {
+		t.Fatalf("expected 1 bar, got %d", len(bars.Bars))
+	}
+
+	beats := bars.Bars[0].Beats
+	if len(beats) != 8 {
+		t.Fatalf("expected 8 beats in the bar, got %d", len(beats))
+	}
+
+	if beats[0].Text == nil || beats[0].Text.Value != "Hello" {
+		t.Fatalf("expected first beat text 'Hello', got '%v'", beats[0].Text)
+	}
+
+	if beats[4].Text == nil || beats[4].Text.Value != "World" {
+		t.Fatalf("expected fifth beat text 'World', got '%v'", beats[4].Text)
+	}
+}
+
 // Tests for createToneLibInfo
 
 func TestCreateToneLibInfo_MidiFile(t *testing.T) {

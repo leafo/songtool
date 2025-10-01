@@ -1422,11 +1422,16 @@ func extractLyricsWithTiming(midiFile *smf.SMF) []LyricEvent {
 	return lyricEvents
 }
 
+// LyricSegment represents a continuous block of lyric text within a measure.
+type LyricSegment struct {
+	StartTime uint32 // Absolute start time in ticks for this lyric phrase
+	Text      string // Parsed lyric text for the phrase
+}
+
 // MeasureLyrics represents lyrics grouped by measure
 type MeasureLyrics struct {
-	MeasureNum int    // 1-based measure number
-	StartTime  uint32 // Time of first lyric in measure
-	Text       string // Merged text for the measure
+	MeasureNum int            // 1-based measure number
+	Segments   []LyricSegment // Ordered lyric phrases within the measure
 }
 
 // groupLyricsByMeasure groups lyric events by measure and merges adjacent lyrics within each measure
@@ -1435,6 +1440,12 @@ func groupLyricsByMeasure(lyricEvents []LyricEvent, timeline *Timeline) []Measur
 
 	if len(lyricEvents) == 0 || timeline == nil || len(timeline.Measures) == 0 {
 		return measureLyrics
+	}
+
+	// Determine lyric spacing threshold (quarter note by default)
+	ticksPerQuarter := 480
+	if timeline != nil && timeline.TicksPerBeat > 0 {
+		ticksPerQuarter = int(timeline.TicksPerBeat)
 	}
 
 	// Group lyrics by measure
@@ -1463,27 +1474,57 @@ func groupLyricsByMeasure(lyricEvents []LyricEvent, timeline *Timeline) []Measur
 		}
 
 		// Sort events by time within the measure
-		// (they should already be sorted, but ensure consistency)
 		sort.Slice(events, func(i, j int) bool {
 			return events[i].Time < events[j].Time
 		})
 
-		// Collect raw lyrics for this measure
-		var rawLyrics []string
-		for _, event := range events {
-			if event.Lyric != "" {
-				rawLyrics = append(rawLyrics, event.Lyric)
+		var segments []LyricSegment
+		var currentTokens []string
+		var segmentStart uint32
+		var lastEventTime uint32
+		hasLastEvent := false
+
+		flushSegment := func() {
+			if len(currentTokens) == 0 {
+				return
 			}
+			merged := parseRockBandLyrics(currentTokens)
+			if merged != "" {
+				segments = append(segments, LyricSegment{
+					StartTime: segmentStart,
+					Text:      merged,
+				})
+			}
+			currentTokens = currentTokens[:0]
 		}
 
-		if len(rawLyrics) > 0 {
-			// Use existing Rock Band lyric parsing to merge and clean up lyrics
-			mergedText := parseRockBandLyrics(rawLyrics)
+		for _, event := range events {
+			if event.Lyric == "" {
+				continue
+			}
 
+			if len(currentTokens) == 0 {
+				segmentStart = event.Time
+				currentTokens = append(currentTokens, event.Lyric)
+			} else {
+				gap := int(event.Time) - int(lastEventTime)
+				if hasLastEvent && gap >= ticksPerQuarter {
+					flushSegment()
+					segmentStart = event.Time
+				}
+				currentTokens = append(currentTokens, event.Lyric)
+			}
+
+			lastEventTime = event.Time
+			hasLastEvent = true
+		}
+
+		flushSegment()
+
+		if len(segments) > 0 {
 			measureLyrics = append(measureLyrics, MeasureLyrics{
 				MeasureNum: measureNum,
-				StartTime:  events[0].Time,
-				Text:       mergedText,
+				Segments:   segments,
 			})
 		}
 	}
@@ -1499,7 +1540,6 @@ func createLyricsBarsFromMeasures(measureLyrics []MeasureLyrics, numBars int, ti
 	if timeline != nil && timeline.TicksPerBeat > 0 {
 		ticksPerQuarter = int(timeline.TicksPerBeat)
 	}
-	ticksPerEighth := ticksPerQuarter / 2
 
 	// Create a map for quick lookup of lyrics by measure number
 	lyricsByMeasure := make(map[int]MeasureLyrics)
@@ -1525,53 +1565,8 @@ func createLyricsBarsFromMeasures(measureLyrics []MeasureLyrics, numBars int, ti
 		}
 
 		// Check if this measure has lyrics
-		if measureLyric, hasLyrics := lyricsByMeasure[barID]; hasLyrics && measureLyric.Text != "" {
-			// Calculate the correct beat position within the measure
-			var beats []ToneLibBeat
-
-			if timeline != nil && barID <= len(timeline.Measures) {
-				measure := timeline.Measures[barID-1] // Convert to 0-based index
-
-				// Calculate relative position within measure
-				relativeTicks := int(measureLyric.StartTime - measure.StartTime)
-
-				// Quantize to nearest eighth note position (0-7 for 4/4 time)
-				eighthNotePosition := (relativeTicks + ticksPerEighth/2) / ticksPerEighth
-				if eighthNotePosition < 0 {
-					eighthNotePosition = 0
-				}
-				if eighthNotePosition > 7 {
-					eighthNotePosition = 7
-				}
-
-				// Create beats with text at calculated position
-				for i := 0; i < 8; i++ {
-					if i == eighthNotePosition {
-						// Text beat at the calculated position
-						beats = append(beats, ToneLibBeat{
-							Duration: ToneLibEighthNoteDuration,
-							Dyn:      ToneLibDefaultDynamic,
-							Text:     &ToneLibText{Value: measureLyric.Text},
-						})
-					} else {
-						// Rest beat
-						beats = append(beats, ToneLibBeat{
-							Duration: ToneLibEighthNoteDuration,
-							Dyn:      ToneLibDefaultDynamic,
-						})
-					}
-				}
-			} else {
-				// Fallback: place text at beginning if no timeline info
-				beats = []ToneLibBeat{
-					{Duration: ToneLibQuarterNoteDuration, Dyn: ToneLibDefaultDynamic, Text: &ToneLibText{Value: measureLyric.Text}},
-					{Duration: ToneLibQuarterNoteDuration, Dyn: ToneLibDefaultDynamic},
-					{Duration: ToneLibQuarterNoteDuration, Dyn: ToneLibDefaultDynamic},
-					{Duration: ToneLibQuarterNoteDuration, Dyn: ToneLibDefaultDynamic},
-				}
-			}
-
-			bar.Beats = beats
+		if measureLyric, hasLyrics := lyricsByMeasure[barID]; hasLyrics && len(measureLyric.Segments) > 0 {
+			bar.Beats = buildLyricBeatsForMeasure(measureLyric, barID, timeline, ticksPerQuarter)
 		} else {
 			// Empty measure - whole rest
 			bar.Beats = []ToneLibBeat{{Duration: ToneLibWholeNoteDuration, Dyn: ToneLibDefaultDynamic}}
@@ -1581,4 +1576,121 @@ func createLyricsBarsFromMeasures(measureLyrics []MeasureLyrics, numBars int, ti
 	}
 
 	return ToneLibTrackBars{Bars: bars}
+}
+
+func buildLyricBeatsForMeasure(measureLyric MeasureLyrics, barID int, timeline *Timeline, ticksPerQuarter int) []ToneLibBeat {
+	beatsPerMeasure := ToneLibDefaultBeatsPerMeasure
+	var measureData *Measure
+
+	if timeline != nil && barID <= len(timeline.Measures) {
+		measure := timeline.Measures[barID-1]
+		measureData = &measure
+		if measure.BeatsPerMeasure > 0 {
+			beatsPerMeasure = measure.BeatsPerMeasure
+		}
+	}
+
+	if beatsPerMeasure <= 0 {
+		beatsPerMeasure = ToneLibDefaultBeatsPerMeasure
+	}
+
+	subdivisions := beatsPerMeasure * 2
+	if subdivisions <= 0 {
+		subdivisions = ToneLibDefaultBeatsPerMeasure * 2
+	}
+
+	beats := make([]ToneLibBeat, subdivisions)
+	for i := range beats {
+		beats[i] = ToneLibBeat{
+			Duration: ToneLibEighthNoteDuration,
+			Dyn:      ToneLibDefaultDynamic,
+		}
+	}
+
+	if measureData != nil && ticksPerQuarter > 0 {
+		measure := *measureData
+		for _, segment := range measureLyric.Segments {
+			index := determineLyricBeatIndex(segment.StartTime, measure, ticksPerQuarter, beatsPerMeasure, subdivisions)
+			placeLyricOnBeat(beats, index, segment.Text)
+		}
+	} else {
+		// Without precise timing, distribute segments sequentially across beats
+		step := 2 // quarter-note spacing (two subdivisions per beat)
+		position := 0
+		for _, segment := range measureLyric.Segments {
+			index := position
+			if index >= subdivisions {
+				index = subdivisions - 1
+			}
+			placeLyricOnBeat(beats, index, segment.Text)
+			position += step
+		}
+	}
+
+	return beats
+}
+
+func determineLyricBeatIndex(startTime uint32, measure Measure, ticksPerQuarter int, beatsPerMeasure int, subdivisions int) int {
+	if subdivisions <= 0 {
+		subdivisions = ToneLibDefaultBeatsPerMeasure * 2
+	}
+	if beatsPerMeasure <= 0 {
+		beatsPerMeasure = ToneLibDefaultBeatsPerMeasure
+	}
+	if ticksPerQuarter <= 0 {
+		return 0
+	}
+
+	relative := int(startTime) - int(measure.StartTime)
+	if relative < 0 {
+		relative = 0
+	}
+
+	quarterPosition := (relative + ticksPerQuarter/2) / ticksPerQuarter
+	if quarterPosition < 0 {
+		quarterPosition = 0
+	}
+	if quarterPosition >= beatsPerMeasure {
+		quarterPosition = beatsPerMeasure - 1
+	}
+
+	index := quarterPosition * 2 // align to quarter-note beat
+	if index < 0 {
+		index = 0
+	}
+	if index >= subdivisions {
+		index = subdivisions - 1
+	}
+
+	return index
+}
+
+func placeLyricOnBeat(beats []ToneLibBeat, startIdx int, text string) {
+	if len(beats) == 0 || text == "" {
+		return
+	}
+
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if startIdx >= len(beats) {
+		startIdx = len(beats) - 1
+	}
+
+	for idx := startIdx; idx < len(beats); idx++ {
+		if beats[idx].Text == nil {
+			beats[idx].Text = &ToneLibText{Value: text}
+			return
+		}
+	}
+
+	// Fall back to appending the text to the last beat if all slots are occupied
+	last := len(beats) - 1
+	if last >= 0 {
+		if beats[last].Text == nil {
+			beats[last].Text = &ToneLibText{Value: text}
+		} else {
+			beats[last].Text.Value = strings.TrimSpace(beats[last].Text.Value + " " + text)
+		}
+	}
 }
